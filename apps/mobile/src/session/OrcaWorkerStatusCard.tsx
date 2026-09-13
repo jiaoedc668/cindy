@@ -24,7 +24,12 @@ function workersFrom(value: unknown): Worker[] {
   return [];
 }
 
-export function OrcaWorkerStatusCard({ leadSessionId, maker }: { leadSessionId: string; maker: MobileMakerTransport }) {
+export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
+  leadSessionId: string;
+  maker: MobileMakerTransport;
+  /** 打开该 Worker 的会话;只读口径由 collaboration.ts 按 orcaRole 判定。 */
+  onOpenWorker?: (workerSessionId: string) => void;
+}) {
   const { colors } = useTheme();
   const [workers, setWorkers] = useState<Worker[] | null>(null);
   const [failed, setFailed] = useState(false);
@@ -37,6 +42,8 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker }: { leadSessionId: 
     let timer: ReturnType<typeof setTimeout> | undefined;
     setWorkers(null);
     setFailed(false);
+    // 换 Lead 等于换一份列表,展开状态不能跟着漏过去。
+    setExpanded(false);
     const load = async () => {
       try {
         const next = workersFrom(await maker.listOrcaWorkersByLead(leadSessionId));
@@ -63,7 +70,9 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker }: { leadSessionId: 
     <Pressable
       accessibilityRole="button"
       accessibilityState={{ expanded }}
-      accessibilityLabel={title}
+      accessibilityLabel={needsAttention
+        ? `${title} · ${i18n.t('session.presentation.collaboration.workerStatus.error')}`
+        : title}
       onPress={() => setExpanded((value) => !value)}
       style={styles.header}
       testID="session.orcaWorkers.toggle"
@@ -74,12 +83,31 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker }: { leadSessionId: 
         : null}
       <Chevron accessible={false} color={colors.textTertiary} size={iconSize.md} strokeWidth={iconStroke.regular} />
     </Pressable>
-    {expanded ? workers.map((worker, index) => <View key={worker.id ?? worker.sessionId ?? index} style={styles.row}>
-      <View style={[styles.dot, { backgroundColor: worker.status === 'error' ? colors.statusError : worker.status === 'done' ? colors.statusDone : colors.statusAccent }]} />
-      <Text numberOfLines={1} style={[styles.name, { color: colors.textPrimary }]}>{worker.label ?? worker.role ?? `Worker ${index + 1}`}</Text>
-      <Text style={[styles.status, { color: colors.textSecondary }]}>{statusLabel(worker.status)}</Text>
-    </View>) : null}
+    {expanded ? workers.map((worker, index) => {
+      const name = worker.label ?? worker.role ?? `Worker ${index + 1}`;
+      const workerSessionId = worker.sessionId;
+      const body = <>
+        <View style={[styles.dot, { backgroundColor: worker.status === 'error' ? colors.statusError : worker.status === 'done' ? colors.statusDone : colors.statusAccent }]} />
+        <Text numberOfLines={1} style={[styles.name, { color: colors.textPrimary }]}>{name}</Text>
+        <Text style={[styles.status, { color: colors.textSecondary }]}>{statusLabel(worker.status)}</Text>
+      </>;
+      const key = worker.id ?? workerSessionId ?? index;
+      // 没有 sessionId 的 Worker 无处可跳,保持静态行,不做假的可点外观。
+      return onOpenWorker && workerSessionId
+        ? <Pressable
+            key={key}
+            accessibilityRole="button"
+            accessibilityLabel={`${name} · ${statusLabel(worker.status)}`}
+            onPress={() => onOpenWorker(workerSessionId)}
+            style={({ pressed }) => [styles.row, styles.rowPressable, pressed && { opacity: 0.6 }]}
+            testID={`session.orcaWorkers.worker.${workerSessionId}`}
+          >
+            {body}
+            <ChevronRight accessible={false} color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          </Pressable>
+        : <View key={key} style={styles.row}>{body}</View>;
+    }) : null}
   </View>;
 }
 
-const styles = StyleSheet.create({ card: { marginHorizontal: 12, marginBottom: 8, padding: 10, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.container }, header: { flexDirection: 'row', alignItems: 'center', gap: 7, minHeight: 44 }, title: { flex: 1, fontSize: typeScale.body, fontWeight: fontWeight.semibold }, attentionDot: { width: 6, height: 6, borderRadius: radius.micro }, row: { flexDirection: 'row', alignItems: 'center', gap: 7, minHeight: lineHeight.listBody }, dot: { width: iconSize.sm, height: iconSize.sm, borderRadius: radius.micro }, name: { flex: 1, fontSize: typeScale.body }, status: { fontSize: typeScale.caption } });
+const styles = StyleSheet.create({ card: { marginHorizontal: 12, marginBottom: 8, padding: 10, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.container }, header: { flexDirection: 'row', alignItems: 'center', gap: 7, minHeight: 44 }, title: { flex: 1, fontSize: typeScale.body, fontWeight: fontWeight.semibold }, attentionDot: { width: 6, height: 6, borderRadius: radius.micro }, row: { flexDirection: 'row', alignItems: 'center', gap: 7, minHeight: lineHeight.listBody }, rowPressable: { minHeight: 44 }, dot: { width: iconSize.sm, height: iconSize.sm, borderRadius: radius.micro }, name: { flex: 1, fontSize: typeScale.body }, status: { fontSize: typeScale.caption } });
