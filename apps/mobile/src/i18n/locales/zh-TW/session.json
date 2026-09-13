@@ -40,6 +40,7 @@
       "noticeOther": "這是電腦端的協同任務。手機版第一版為唯讀，協同編排操作請在電腦端完成。",
       "readOnlyReason": "協同模式在手機版第一版中為唯讀。確認處理、佇列編輯和任務修改請在電腦端完成。",
       "composerReadOnlyReason": "這個協同子任務在手機版中為唯讀，請在電腦端傳送訊息。",
+      "workersTitle": "Worker（{{n}}）",
       "workerStatus": {
         "unknown": "未知",
         "running": "執行中",
