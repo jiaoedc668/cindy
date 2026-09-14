@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useReducer, useState } from 'react';
 import { AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { ChevronDown, ChevronRight } from 'lucide-react-native';
@@ -35,6 +35,42 @@ function workerKey(worker: Worker, index: number): string {
   return worker.id ?? worker.sessionId ?? String(index);
 }
 
+/**
+ * 进程级 edge-trigger attention store,对齐
+ * docs/dev-rules/orca-team-architecture.md:324 的不变量:
+ * 「worker 状态跳变进 done 才标 attention;正在查看该 worker 时清除;
+ *  只切走 / 切回不应让同一轮 done 重新变未读」。
+ *
+ * 因此未读不能是组件局部 state —— 切 Lead、离开会话页再回来都不得重置。
+ * lastStatus 用于边沿判定:done → running → done 属于两次跳变,第二次必须
+ * 重新标记;而同一轮 done 期间的反复切换不产生新边沿。
+ * 以 module 作用域承载 = 桌面 workerAttentionStore 在手机端的等价物。
+ */
+const unreadWorkers = new Set<string>();
+const lastWorkerStatus = new Map<string, string>();
+
+function attentionKey(leadSessionId: string, key: string): string {
+  return `${leadSessionId}::${key}`;
+}
+
+/** 按新快照推进边沿判定。返回未读集合是否变化,供调用方决定是否重渲染。 */
+function applyWorkerAttentionEdges(leadSessionId: string, workers: Worker[]): boolean {
+  let changed = false;
+  workers.forEach((worker, index) => {
+    const key = attentionKey(leadSessionId, workerKey(worker, index));
+    const status = worker.status ?? 'unknown';
+    const previous = lastWorkerStatus.get(key);
+    lastWorkerStatus.set(key, status);
+    if (previous === status) return;
+    // 跳变进终态才标未读;离开终态自然不再是未读来源。
+    if (attentionStatuses.has(status) && !unreadWorkers.has(key)) {
+      unreadWorkers.add(key);
+      changed = true;
+    }
+  });
+  return changed;
+}
+
 function workersFrom(value: unknown): Worker[] {
   if (Array.isArray(value)) return value.filter((v): v is Worker => !!v && typeof v === 'object');
   if (value && typeof value === 'object' && Array.isArray((value as { workers?: unknown }).workers)) {
@@ -67,16 +103,14 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
     const subscription = AppState.addEventListener('change', (next) => setAppActive(next === 'active'));
     return () => subscription.remove();
   }, []);
-  // 换 Lead 等于换一份列表:清空快照与展开态。失焦/回前台不走这里,避免把已拿到的
-  // 列表也一并清掉。
-  // 已查看登记:workerKey → 查看时的状态。对齐桌面 useOrcaWorkerAttentionWatcher
-  // 的边沿语义(enteredDone && !isViewed):记下「看的是哪个状态」,状态再变动时
-  // 比对不上即重新提示;手机端只读、无法让 Worker 离开 done,不记已读点会永久亮着。
-  const [acknowledged, setAcknowledged] = useState<Record<string, string>>({});
+  // 未读只存在于 module 级 store(见上),这里只用一个计数器触发重渲染。
+  const [, bumpAttention] = useReducer((value: number) => value + 1, 0);
+  // 换 Lead 等于换一份列表:清空快照与展开态。未读**不在**此处重置 —— 契约要求
+  // 切走 / 切回不得让同一轮 done 重新变未读。失焦/回前台同样不走这里,避免把已
+  // 拿到的列表一并清掉。
   useEffect(() => {
     setWorkers(null);
     setExpanded(false);
-    setAcknowledged({});
   }, [leadSessionId]);
   const polling = focused && appActive;
   useEffect(() => {
@@ -86,7 +120,10 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
     const load = async () => {
       try {
         const next = workersFrom(await maker.listOrcaWorkersByLead(leadSessionId));
-        if (active) setWorkers(next);
+        if (active) {
+          applyWorkerAttentionEdges(leadSessionId, next);
+          setWorkers(next);
+        }
       } catch {
         // 刷新失败保留上一份快照:弱网下的瞬时超时不应让整张卡消失。
       } finally {
@@ -106,8 +143,7 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
   // 与桌面 useOrcaWorkerAttentionWatcher:44-49 一致:done 在被查看前同样算未读;
   // 查看过就不再提示,直到该 Worker 的状态再次变动。
   const pending = workers.filter((worker, index) =>
-    attentionStatuses.has(worker.status ?? '')
-    && acknowledged[workerKey(worker, index)] !== worker.status);
+    unreadWorkers.has(attentionKey(leadSessionId, workerKey(worker, index))));
   const needsAttention = pending.length > 0;
   const attentionStatus = pending.some((worker) => worker.status === 'error') ? 'error' : 'done';
   const Chevron = expanded ? ChevronDown : ChevronRight;
@@ -144,8 +180,8 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
             accessibilityRole="button"
             accessibilityLabel={`${name} · ${statusLabel(worker.status)}`}
             onPress={() => {
-              // 打开即视为已查看:登记当前状态,清掉这一条的提示。
-              setAcknowledged((prev) => ({ ...prev, [key]: worker.status ?? 'unknown' }));
+              // 打开即「正在查看」→ 清除该 worker 的未读(契约:查看时清除)。
+              if (unreadWorkers.delete(attentionKey(leadSessionId, key))) bumpAttention();
               onOpenWorker(workerSessionId);
             }}
             style={({ pressed }) => [styles.row, styles.rowPressable, pressed && { opacity: 0.6 }]}

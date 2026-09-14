@@ -58,6 +58,8 @@ let root: Root;
 
 beforeEach(() => {
   h.listOrcaWorkersByLead.mockReset();
+  leadSeq += 1;
+  lead = `lead-${leadSeq}`;
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -69,12 +71,17 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// 未读是 module 级 store(契约要求跨组件切换存活),因此每个用例必须用各自的
+// leadSessionId,否则会互相串味。
+let leadSeq = 0;
+let lead = 'lead-0';
+
 async function render(workers: unknown[], onOpenWorker?: (id: string) => void) {
   h.listOrcaWorkersByLead.mockResolvedValue(workers);
   await act(async () => {
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
-        leadSessionId: 'lead-1',
+        leadSessionId: lead,
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
         onOpenWorker,
       }),
@@ -133,15 +140,17 @@ it('状态点按语义分流:idle 走中性色,不与运行中撞色', async () 
   expect(dotColorOf('w-unknown')).toBe('TEXT_TERTIARY');
 });
 
-it('done 与 error 都触发折叠态提示;仅 idle/running 不提示', async () => {
+it('idle 不提示,跳变进 done 才提示', async () => {
+  vi.useFakeTimers();
   await render([{ id: 'a', label: 'w', status: 'idle', sessionId: 's-a' }]);
   expect(attentionDot()).toBeNull();
 
-  await act(async () => root.unmount());
-  container = document.createElement('div');
-  document.body.appendChild(container);
-  root = createRoot(container);
-  await render([{ id: 'a', label: 'w', status: 'done', sessionId: 's-a' }]);
+  h.listOrcaWorkersByLead.mockResolvedValue([
+    { id: 'a', label: 'w', status: 'done', sessionId: 's-a' },
+  ]);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000);
+  });
   expect(attentionDot()).not.toBeNull();
 });
 
@@ -162,10 +171,7 @@ it('打开 Worker 即视为已查看,提示随之清除', async () => {
   expect(attentionDot()).toBeNull();
 });
 
-it('已查看后状态再变动,重新提示(边沿语义,非一次性静音)', async () => {
-  vi.useFakeTimers();
-  const onOpenWorker = vi.fn();
-  await render([{ id: 'a', label: 'w', status: 'done', sessionId: 's-a' }], onOpenWorker);
+async function viewWorker() {
   await act(async () => toggle().click());
   await act(async () => {
     (container.querySelector(
@@ -173,14 +179,46 @@ it('已查看后状态再变动,重新提示(边沿语义,非一次性静音)', 
     ) as HTMLButtonElement).click();
   });
   await act(async () => toggle().click());
+}
+
+it('done → running → done 属于两次跳变,第二轮完成必须重新提示', async () => {
+  vi.useFakeTimers();
+  await render([{ id: 'a', label: 'w', status: 'done', sessionId: 's-a' }], vi.fn());
+  await viewWorker();
   expect(attentionDot()).toBeNull();
 
-  // 远端状态从 done 变成 error:已查看登记的是 done,比对不上 → 重新提示。
+  // 离开终态。
   h.listOrcaWorkersByLead.mockResolvedValue([
-    { id: 'a', label: 'w', status: 'error', sessionId: 's-a' },
+    { id: 'a', label: 'w', status: 'running', sessionId: 's-a' },
+  ]);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000);
+  });
+  expect(attentionDot()).toBeNull();
+
+  // 再次进入 done:新的一轮,必须重新提示,不能被上一轮的已查看吞掉。
+  h.listOrcaWorkersByLead.mockResolvedValue([
+    { id: 'a', label: 'w', status: 'done', sessionId: 's-a' },
   ]);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000);
   });
   expect(attentionDot()).not.toBeNull();
+});
+
+it('切走再切回不得让同一轮 done 重新变未读(orca-team-architecture.md:324)', async () => {
+  vi.useFakeTimers();
+  const workers = [{ id: 'a', label: 'w', status: 'done', sessionId: 's-a' }];
+  await render(workers, vi.fn());
+  await viewWorker();
+  expect(attentionDot()).toBeNull();
+
+  // 整个组件卸载重建 = 离开会话页再回来;状态未变,不应产生新边沿。
+  await act(async () => root.unmount());
+  container.remove();
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await render(workers, vi.fn());
+  expect(attentionDot()).toBeNull();
 });
