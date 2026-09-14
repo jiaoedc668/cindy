@@ -29,6 +29,12 @@ function statusDotColor(status: string | undefined, colors: ThemeColors): string
   return colors.textTertiary;
 }
 
+const attentionStatuses = new Set(['done', 'error']);
+
+function workerKey(worker: Worker, index: number): string {
+  return worker.id ?? worker.sessionId ?? String(index);
+}
+
 function workersFrom(value: unknown): Worker[] {
   if (Array.isArray(value)) return value.filter((v): v is Worker => !!v && typeof v === 'object');
   if (value && typeof value === 'object' && Array.isArray((value as { workers?: unknown }).workers)) {
@@ -63,9 +69,14 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
   }, []);
   // 换 Lead 等于换一份列表:清空快照与展开态。失焦/回前台不走这里,避免把已拿到的
   // 列表也一并清掉。
+  // 已查看登记:workerKey → 查看时的状态。对齐桌面 useOrcaWorkerAttentionWatcher
+  // 的边沿语义(enteredDone && !isViewed):记下「看的是哪个状态」,状态再变动时
+  // 比对不上即重新提示;手机端只读、无法让 Worker 离开 done,不记已读点会永久亮着。
+  const [acknowledged, setAcknowledged] = useState<Record<string, string>>({});
   useEffect(() => {
     setWorkers(null);
     setExpanded(false);
+    setAcknowledged({});
   }, [leadSessionId]);
   const polling = focused && appActive;
   useEffect(() => {
@@ -92,11 +103,13 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
   // 顶部内距,先撑开再收起会让会话内容跳动。
   if (!workers?.length) return null;
   const title = i18n.t('session.presentation.collaboration.workersTitle', { n: workers.length });
-  // 与桌面 useOrcaWorkerAttentionWatcher:44-49 一致:done 在被查看前同样算未读。
-  const hasError = workers.some((worker) => worker.status === 'error');
-  const hasDone = workers.some((worker) => worker.status === 'done');
-  const needsAttention = hasError || hasDone;
-  const attentionStatus = hasError ? 'error' : 'done';
+  // 与桌面 useOrcaWorkerAttentionWatcher:44-49 一致:done 在被查看前同样算未读;
+  // 查看过就不再提示,直到该 Worker 的状态再次变动。
+  const pending = workers.filter((worker, index) =>
+    attentionStatuses.has(worker.status ?? '')
+    && acknowledged[workerKey(worker, index)] !== worker.status);
+  const needsAttention = pending.length > 0;
+  const attentionStatus = pending.some((worker) => worker.status === 'error') ? 'error' : 'done';
   const Chevron = expanded ? ChevronDown : ChevronRight;
   return <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
     <Pressable
@@ -123,14 +136,18 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
         <Text numberOfLines={1} style={[styles.name, { color: colors.textPrimary }]}>{name}</Text>
         <Text style={[styles.status, { color: colors.textSecondary }]}>{statusLabel(worker.status)}</Text>
       </>;
-      const key = worker.id ?? workerSessionId ?? index;
+      const key = workerKey(worker, index);
       // 没有 sessionId 的 Worker 无处可跳,保持静态行,不做假的可点外观。
       return onOpenWorker && workerSessionId
         ? <Pressable
             key={key}
             accessibilityRole="button"
             accessibilityLabel={`${name} · ${statusLabel(worker.status)}`}
-            onPress={() => onOpenWorker(workerSessionId)}
+            onPress={() => {
+              // 打开即视为已查看:登记当前状态,清掉这一条的提示。
+              setAcknowledged((prev) => ({ ...prev, [key]: worker.status ?? 'unknown' }));
+              onOpenWorker(workerSessionId);
+            }}
             style={({ pressed }) => [styles.row, styles.rowPressable, pressed && { opacity: 0.6 }]}
             testID={`session.orcaWorkers.worker.${workerSessionId}`}
           >
