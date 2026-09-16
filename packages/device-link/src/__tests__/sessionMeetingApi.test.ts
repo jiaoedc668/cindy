@@ -17,6 +17,20 @@ function setup() {
   return { api, request, changeAccountOrRegion: () => { generation++; } };
 }
 describe('meeting management client', () => {
+  it('observes a late create ID for host cleanup but never returns stale UI success', async () => {
+    const { api, request, changeAccountOrRegion } = setup();
+    const observed = vi.fn();
+    request.mockImplementation(async () => { changeAccountOrRegion(); return { meetingId: 'meeting', revision: 1 }; });
+    await expect(api.create('session', 'Task', observed)).rejects.toBeInstanceOf(SessionMeetingScopeChangedError);
+    expect(observed).toHaveBeenCalledExactlyOnceWith('meeting');
+  });
+  it('does not pass malformed create IDs to cleanup', async () => {
+    const { api, request } = setup();
+    const observed = vi.fn();
+    request.mockResolvedValue({ meetingId: '../bad', revision: 1 });
+    await expect(api.create('session', 'Task', observed)).rejects.toThrow('identifier');
+    expect(observed).not.toHaveBeenCalled();
+  });
   it('projects the server snapshot separately from display labels', async () => {
     const { api, request } = setup();
     const input = snapshot();

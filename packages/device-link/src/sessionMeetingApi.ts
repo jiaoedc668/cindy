@@ -58,19 +58,25 @@ export class SessionMeetingScopeChangedError extends Error {
 
 /** Management API only; never authorizes full-device IPC or enables a legacy relay. */
 export function createSessionMeetingApi(options: SessionMeetingApiOptions) {
-  async function request(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown): Promise<Record<string, unknown>> {
+  async function request(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown, observe?: (value: Record<string, unknown>) => void): Promise<Record<string, unknown>> {
     const scope = options.captureScope();
     if (!scope.isCurrent()) throw new SessionMeetingScopeChangedError();
     const value = await options.request(`/api/device-link/meetings${path}`, {
       method, ...(body === undefined ? {} : { body }), isCurrent: () => scope.isCurrent(),
     });
+    const parsed = row(value);
+    // Creation cleanup must learn the committed ID even after an auth boundary.
+    // This observer is host-owned bookkeeping, never a success delivery to UI.
+    observe?.(parsed);
     if (!scope.isCurrent()) throw new SessionMeetingScopeChangedError();
-    return row(value);
+    return parsed;
   }
   const route = (meetingId: string) => `/${encodeURIComponent(id(meetingId))}`;
   return {
-    async create(sessionId: string, title: string) {
-      const value = await request('', 'POST', { sessionId: id(sessionId), title: label(title) });
+    async create(sessionId: string, title: string, observeCommitted?: (meetingId: string) => void) {
+      const value = await request('', 'POST', { sessionId: id(sessionId), title: label(title) }, (value) => {
+        observeCommitted?.(id(value.meetingId));
+      });
       return { meetingId: id(value.meetingId), revision: integer(value.revision) };
     },
     async list(): Promise<SessionMeetingListItem[]> {

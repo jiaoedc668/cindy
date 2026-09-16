@@ -1,4 +1,4 @@
-import { isMeetingPeer, parseMeetingPeer, isSessionMeetingAttachment, type InvokePayload, type SessionMeetingQueueItem } from '@cindy/device-link';
+import { isMeetingPeer, parseMeetingPeer, isSessionMeetingAttachment, type InvokePayload, type InvokeResultPayload, type SessionMeetingQueueItem } from '@cindy/device-link';
 import type { SessionMeetingHost } from './sessionMeetingHost.js';
 
 export type SessionMeetingPeerCapture = NonNullable<ReturnType<SessionMeetingHost['capturePeer']>>;
@@ -8,6 +8,16 @@ export function setSessionMeetingQueueReader(value: typeof readQueueItem): void 
 export function setSessionMeetingDispatchHost(value: SessionMeetingHost | null): void { host = value; }
 export function captureSessionMeetingPeer(source: string): SessionMeetingPeerCapture | null {
   return host?.capturePeer(source) ?? null;
+}
+
+/** Only confirmed membership loss may evict a guest's shared task on the client. */
+export function sessionMeetingAccessFailure(source: string, capture?: SessionMeetingPeerCapture | null): InvokeResultPayload {
+  const status = host?.peerStatus(source) ?? 'unavailable';
+  if (status === 'revoked') return { ok: false, error: { code: 'ACCESS_REVOKED', message: 'Shared task access revoked' } };
+  if (status === 'unavailable' || !capture?.isCurrent()) {
+    return { ok: false, error: { code: 'NOT_CONNECTED', message: 'Shared task authority changed or is temporarily unavailable' } };
+  }
+  return { ok: false, error: { code: 'IPC_ERROR', message: '[PERMISSION_DENIED] Shared task request denied' } };
 }
 
 // These existing list events also carry single-task state. Shared peers receive

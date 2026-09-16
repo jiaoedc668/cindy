@@ -85,7 +85,7 @@ import {
 import { getControllerPlatform } from './controllerPlatform';
 import { getDeviceLinkInvokeContext, runDeviceLinkInvokeContext } from './invoke-context';
 import { isMeetingPeer, SESSION_MEETING_CAPABILITY } from '@cindy/device-link';
-import { captureSessionMeetingPeer, captureSessionMeetingPush, assertSessionMeetingInvoke, sessionMeetingMetadataTopic } from './sessionMeetingDispatch.js';
+import { captureSessionMeetingPeer, captureSessionMeetingPush, assertSessionMeetingInvoke, sessionMeetingMetadataTopic, sessionMeetingAccessFailure } from './sessionMeetingDispatch.js';
 import { runAsBackgroundDbRpc } from '../localDb/client/rpcAdmission.js';
 import { fetchLocalMediaToOss } from './mediaFetch';
 import { refreshSessionMeetingPeer } from './sessionMeetingDispatch.js';
@@ -2366,7 +2366,12 @@ function handleLinkOpen(
       return;
     }
     const meeting = captureSessionMeetingPeer(src);
-    if (!meeting || !sanitizeControllerCapabilities(payload?.capabilities).includes(SESSION_MEETING_CAPABILITY)) {
+    if (!meeting) {
+      const failure = sessionMeetingAccessFailure(src);
+      client.closeLink(src, !failure.ok && failure.error.code === 'ACCESS_REVOKED' ? 'revoked' : 'transport-timeout', 'inbound');
+      return;
+    }
+    if (!sanitizeControllerCapabilities(payload?.capabilities).includes(SESSION_MEETING_CAPABILITY)) {
       client.closeLink(src, 'revoked', 'inbound');
       return;
     }
@@ -2729,8 +2734,7 @@ function settleRemoteInvokeWithOrphanDeadline(
 }
 
 function currentRemoteInvokeAdmissionFailure(src: string): InvokeResultPayload | null {
-  if (isMeetingPeer(src)) return captureSessionMeetingPeer(src) ? null
-    : { ok: false, error: { code: 'ACCESS_REVOKED', message: 'meeting access revoked' } };
+  if (isMeetingPeer(src)) return captureSessionMeetingPeer(src) ? null : sessionMeetingAccessFailure(src);
   if (!readDeviceLinkSettings().remoteControlEnabled) {
     return { ok: false, error: { code: 'REMOTE_DISABLED', message: 'remote control disabled' } };
   }
@@ -2989,12 +2993,12 @@ function trySendInvokeResult(
   logFailure = true,
 ): { sent: true; result: InvokeResultPayload } | { sent: false; result: InvokeResultPayload } {
   if (isMeetingPeer(src)) {
+    const meeting = captureSessionMeetingPeer(src);
     try {
-      const meeting = captureSessionMeetingPeer(src);
       if (!meeting || !channel) throw new Error('Meeting unavailable');
       assertSessionMeetingInvoke(meeting, { channel, args: args ?? [] }, undefined, 'result');
     } catch {
-      result = { ok: false, error: { code: 'ACCESS_REVOKED', message: 'meeting task access denied' } };
+      result = sessionMeetingAccessFailure(src, meeting);
     }
   }
   let candidate = result;
@@ -3512,12 +3516,12 @@ function isRemoteSubscriptionTopic(value: unknown): value is Topic {
 
 function handleSubscriptionFrame(src: string, payload: InvokePayload): InvokeResultPayload {
   if (isMeetingPeer(src)) {
+    const meeting = captureSessionMeetingPeer(src);
     try {
-      const meeting = captureSessionMeetingPeer(src);
       if (!meeting) throw new Error('Meeting unavailable');
       assertSessionMeetingInvoke(meeting, payload);
     } catch {
-      return { ok: false, error: { code: 'ACCESS_REVOKED', message: 'meeting task access denied' } };
+      return sessionMeetingAccessFailure(src, meeting);
     }
   }
   // 被控开关(server 已 gate invoke,这里二次兜底)
@@ -3623,7 +3627,7 @@ export async function runInvoke(
     if (!meeting.isCurrent()) throw new Error('Meeting revoked');
     return result;
   } catch {
-    return { ok: false, error: { code: 'ACCESS_REVOKED', message: 'meeting task access denied' } };
+    return sessionMeetingAccessFailure(src, meeting);
   }
 }
 

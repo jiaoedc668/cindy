@@ -10,11 +10,20 @@ interface HostedMeeting {
   access: SessionMeetingAccess;
   detail: SessionMeetingDetail | null;
 }
+/** Lifecycle bookkeeping survives same-profile runtime replacement; grants do not. */
+export interface SessionMeetingCreationState {
+  pending: Map<Promise<unknown>, string>;
+  identities: Map<string, SessionMeetingIdentity>;
+  closedSessions?: Set<string>;
+  sessionGenerations?: Map<string, number>;
+  taskClosures?: Map<string, Promise<string[]>>;
+}
 export interface SessionMeetingHostOptions {
   api: SessionMeetingApi;
   journal: SessionMeetingJournal;
   ownerAccountId: string;
   hostDeviceId: string;
+  creationState?: SessionMeetingCreationState;
   /** Bound at construction to this profile/auth/region generation. */
   isCurrent(): boolean;
   readSession(sessionId: string): Promise<{ id: string; title: string; status: string } | null>;
@@ -27,20 +36,35 @@ export interface SessionMeetingHostOptions {
 export class SessionMeetingHost {
   private disposed = false;
   private boundaryClosed = false;
-  private readonly closedSessions = new Set<string>();
+  private readonly closedSessions: Set<string>;
+  private readonly sessionGenerations: Map<string, number>;
+  private readonly taskClosures: Map<string, Promise<string[]>>;
+  private readonly creating: SessionMeetingCreationState['pending'];
+  private readonly created: SessionMeetingCreationState['identities'];
   private readonly entries = new Map<string, HostedMeeting>();
   private readonly closed = new Set<string>();
   private readonly chains = new Map<string, Promise<unknown>>();
   // Keep failed writes too: disposal must not report durability after a disk error.
   private readonly closeWrites = new Map<string, Promise<void>>();
   private readonly reconciliation = new Map<string, Map<string, () => void>>();
-  constructor(private readonly options: SessionMeetingHostOptions) {}
+  constructor(private readonly options: SessionMeetingHostOptions) {
+    const lifecycle: SessionMeetingCreationState = options.creationState ?? { pending: new Map(), identities: new Map() };
+    this.creating = lifecycle.pending;
+    this.created = lifecycle.identities;
+    this.closedSessions = lifecycle.closedSessions ??= new Set();
+    this.sessionGenerations = lifecycle.sessionGenerations ??= new Map();
+    this.taskClosures = lifecycle.taskClosures ??= new Map();
+  }
 
   private assertCurrent(): void {
     if (this.disposed || this.boundaryClosed || !this.options.isCurrent()) throw new Error('Meeting host generation changed');
   }
-  private assertSessionOpen(sessionId: string): void {
+  private assertSessionGeneration(sessionId: string, generation: number): void {
     this.assertCurrent();
+    if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) throw new Error('Shared task was closed');
+  }
+  private assertSessionOpen(sessionId: string, generation = this.sessionGenerations.get(sessionId) ?? 0): void {
+    this.assertSessionGeneration(sessionId, generation);
     if (this.closedSessions.has(sessionId)) throw new Error('Shared task was closed');
   }
   private requireEntry(meetingId: string): HostedMeeting {
@@ -58,17 +82,17 @@ export class SessionMeetingHost {
     void result.finally(() => { if (this.chains.get(meetingId) === result) this.chains.delete(meetingId); }).catch(() => undefined);
     return result;
   }
-  private async accept(detail: SessionMeetingDetail): Promise<void> {
+  private async accept(detail: SessionMeetingDetail, generation: number): Promise<void> {
     this.assertCurrent();
     const snapshot = parseSessionMeetingSnapshot(detail);
-    this.assertSessionOpen(snapshot.sessionId);
+    this.assertSessionOpen(snapshot.sessionId, generation);
     if (snapshot.ownerAccountId !== this.options.ownerAccountId || snapshot.hostDeviceId !== this.options.hostDeviceId) throw new Error('Meeting is not hosted by this device');
     if (this.closed.has(snapshot.meetingId)) throw new Error('Meeting is closed locally');
     const session = await this.options.readSession(snapshot.sessionId);
-    this.assertSessionOpen(snapshot.sessionId);
+    this.assertSessionOpen(snapshot.sessionId, generation);
     if (!session || session.id !== snapshot.sessionId || session.status !== 'active') throw new Error('Meeting task is unavailable');
     const persisted = (await this.options.journal.latest()).find((item) => item.meetingId === snapshot.meetingId);
-    this.assertSessionOpen(snapshot.sessionId);
+    this.assertSessionOpen(snapshot.sessionId, generation);
     if (persisted?.terminal || this.closed.has(snapshot.meetingId)) throw new Error('Meeting is closed locally');
     if (persisted?.snapshot) {
       const check = new SessionMeetingAccess(persisted.snapshot);
@@ -84,12 +108,12 @@ export class SessionMeetingHost {
       }
     }
     await this.options.journal.recordAuthority(snapshot);
-    this.assertSessionOpen(snapshot.sessionId);
+    this.assertSessionOpen(snapshot.sessionId, generation);
     if (this.closed.has(snapshot.meetingId)) return;
     // A local close could have been persisted by another host callback while
     // this write awaited; never treat a rejected insert as permission to grant.
     const latest = (await this.options.journal.latest()).find((item) => item.meetingId === snapshot.meetingId);
-    this.assertSessionOpen(snapshot.sessionId);
+    this.assertSessionOpen(snapshot.sessionId, generation);
     if (!latest || latest.terminal && snapshot.status !== 'closed' || this.closed.has(snapshot.meetingId)) return;
     if (!latest.snapshot || latest.snapshot.revision !== snapshot.revision) return;
     if (!entry) {
@@ -99,7 +123,11 @@ export class SessionMeetingHost {
     if (entry.access.applyVerifiedSnapshot(snapshot) || entry.detail === null) {
       for (const previous of entry.detail?.guests ?? []) {
         const current = snapshot.guests.find((guest) => guest.memberId === previous.memberId);
-        if (!current || current.version !== previous.version) this.options.revoke(snapshot.meetingId, previous.memberId);
+        // Adding another device invalidates old captures via member version,
+        // but does not revoke the existing devices or their subscriptions.
+        if (!current || previous.deviceIds.some((id) => !current.deviceIds.includes(id))) {
+          this.options.revoke(snapshot.meetingId, previous.memberId);
+        }
       }
       entry.detail = detail;
       if (snapshot.status === 'closed') {
@@ -112,27 +140,55 @@ export class SessionMeetingHost {
   }
   private async refreshNow(meetingId: string): Promise<void> {
     this.assertCurrent();
-    await this.accept(await this.options.api.get(meetingId));
+    const generations = new Map(this.sessionGenerations);
+    const detail = await this.options.api.get(meetingId);
+    await this.accept(detail, generations.get(detail.sessionId) ?? 0);
     for (const release of this.reconciliation.get(meetingId)?.values() ?? []) release();
     this.reconciliation.delete(meetingId);
   }
   refresh(meetingId: string): Promise<void> { return this.serial(meetingId, () => this.refreshNow(meetingId)); }
 
   async open(sessionId: string): Promise<string> {
-    this.assertSessionOpen(sessionId);
+    this.assertCurrent();
+    const generation = this.sessionGenerations.get(sessionId) ?? 0;
+    // An explicit open may re-share an unarchived task, only after the prior
+    // boundary has drained its creates and made their closures durable.
+    await this.taskClosures.get(sessionId);
+    this.assertSessionGeneration(sessionId, generation);
     const session = await this.options.readSession(sessionId);
-    this.assertSessionOpen(sessionId);
+    this.assertSessionGeneration(sessionId, generation);
     if (!session || session.id !== sessionId || session.status !== 'active') throw new Error('Meeting task is unavailable');
-    const created = await this.options.api.create(sessionId, session.title);
+    const journal = await this.options.journal.latest();
+    this.assertSessionGeneration(sessionId, generation);
+    // Server create is idempotent for an active task: close the previous IDs
+    // first, including closures inherited from another runtime or restart.
+    for (const item of journal) {
+      if (item.sessionId !== sessionId || !item.terminal) continue;
+      await this.options.api.close(item.meetingId);
+      this.assertSessionGeneration(sessionId, generation);
+    }
+    this.closedSessions.delete(sessionId);
+    this.assertSessionOpen(sessionId, generation);
+    const rememberCreated = (meetingId: string) => {
+      this.created.set(meetingId, { meetingId, sessionId, ownerAccountId: this.options.ownerAccountId, hostDeviceId: this.options.hostDeviceId });
+    };
+    const creating = this.options.api.create(sessionId, session.title, rememberCreated);
+    this.creating.set(creating, sessionId);
+    let created: Awaited<typeof creating>;
+    try {
+      created = await creating;
+      rememberCreated(created.meetingId);
+    } finally { this.creating.delete(creating); }
     if (this.boundaryClosed || this.closedSessions.has(sessionId)) {
-      await this.options.api.close(created.meetingId);
+      // The boundary drains this request, journals the identity and closes it
+      // using outgoing credentials. Ordinary API scopes are already fenced.
       throw new Error('Shared task was closed');
     }
-    this.assertSessionOpen(sessionId);
+    this.assertSessionOpen(sessionId, generation);
     await this.serial(created.meetingId, async () => {
       const detail = await this.options.api.get(created.meetingId);
       if (detail.sessionId !== sessionId) throw new Error('Meeting task does not match');
-      await this.accept(detail);
+      await this.accept(detail, generation);
     });
     const detail = this.entries.get(created.meetingId)?.detail;
     if (!detail || detail.sessionId !== sessionId || detail.status !== 'active') throw new Error('Meeting could not be opened');
@@ -185,7 +241,8 @@ export class SessionMeetingHost {
   }
   remove(meetingId: string, memberId: string): Promise<void> {
     const release = this.requireEntry(meetingId).access.suspendMember(memberId);
-    this.options.revoke(meetingId, memberId);
+    // Suspend host reads/writes immediately. A failed request can leave this
+    // member authorized, so send permanent revocation only from fresh authority.
     return this.serial(meetingId, async () => {
       try {
         this.requireEntry(meetingId);
@@ -225,6 +282,21 @@ export class SessionMeetingHost {
     this.options.changed(meetingId);
     return closing;
   }
+  /** A temporary authority fence is not evidence that membership was revoked. */
+  peerStatus(source: string): 'available' | 'unavailable' | 'revoked' {
+    const peer = parseMeetingPeer(source);
+    if (!peer || peer.role !== 'guest') return 'revoked';
+    if (this.closed.has(peer.meetingId)) return 'revoked';
+    if (this.disposed || !this.options.isCurrent()) return 'unavailable';
+    const entry = this.entries.get(peer.meetingId);
+    if (!entry?.detail) return 'unavailable';
+    if (this.boundaryClosed || this.closedSessions.has(entry.identity.sessionId)) return 'revoked';
+    const member = entry.detail.guests.find((guest) => guest.memberId === peer.memberId);
+    if (!member || !member.deviceIds.includes(peer.deviceId)) return 'revoked';
+    return entry.access.authorize({ accountId: member.accountId, deviceId: peer.deviceId },
+      entry.identity.sessionId, 'history.read').allowed ? 'available' : 'unavailable';
+  }
+
   /** Only resolve relay-stamped logical peers against verified host authority. */
   capturePeer(source: string) {
     const peer = parseMeetingPeer(source);
@@ -254,10 +326,23 @@ export class SessionMeetingHost {
   }
 
   /** Account teardown has already fenced network scopes. Durability must not depend on them. */
-  async closeLocallyForBoundary(sessionId?: string): Promise<void> {
+  closeLocallyForBoundary(sessionId?: string): Promise<string[]> {
     // Fence in-flight accept/open before the first journal await.
-    if (sessionId) this.closedSessions.add(sessionId);
+    if (sessionId) {
+      this.closedSessions.add(sessionId);
+      this.sessionGenerations.set(sessionId, (this.sessionGenerations.get(sessionId) ?? 0) + 1);
+    }
     else this.boundaryClosed = true;
+    let closing = this.persistBoundaryClosure(sessionId);
+    if (sessionId) {
+      const previous = this.taskClosures.get(sessionId);
+      if (previous) closing = Promise.all([previous, closing]).then((lists) => [...new Set(lists.flat())]);
+      this.taskClosures.set(sessionId, closing);
+    }
+    return closing;
+  }
+
+  private async persistBoundaryClosure(sessionId?: string): Promise<string[]> {
     const identities = new Map<string, SessionMeetingIdentity>();
     for (const [id, entry] of this.entries) {
       if (sessionId && entry.identity.sessionId !== sessionId) continue;
@@ -267,6 +352,15 @@ export class SessionMeetingHost {
       if (entry.detail) entry.detail = Object.freeze({ ...entry.detail, status: 'closed' });
       this.options.revoke(id);
       this.options.changed(id);
+    }
+    // Keep the outgoing profile alive through the existing bounded create
+    // requests. Their response observer runs before stale-scope rejection.
+    await Promise.allSettled([...this.creating].filter(([, sid]) => !sessionId || sid === sessionId).map(([pending]) => pending));
+    if (!sessionId) await Promise.all(this.taskClosures.values());
+    for (const [id, identity] of this.created) {
+      if (sessionId && identity.sessionId !== sessionId) continue;
+      identities.set(id, identity);
+      this.closed.add(id);
     }
     // Also close meetings not restored yet (e.g. logout during authority fetch).
     for (const item of await this.options.journal.latest()) {
@@ -280,6 +374,7 @@ export class SessionMeetingHost {
       this.closeWrites.set(id, write);
       await write;
     }
+    return [...identities.keys()];
   }
 
   /**

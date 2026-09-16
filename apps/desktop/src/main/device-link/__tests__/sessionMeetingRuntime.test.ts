@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 type HostRecord = {
-  options: { isCurrent(): boolean; revoke(meetingId: string, memberId?: string): void };
+  options: { creationState: unknown; isCurrent(): boolean; revoke(meetingId: string, memberId?: string): void };
   restore: ReturnType<typeof vi.fn>;
   dispose: ReturnType<typeof vi.fn>;
+  closeLocallyForBoundary: ReturnType<typeof vi.fn>;
 };
 const state = vi.hoisted(() => ({
   accountId: 'owner', region: 'global', authenticated: true,
   session: { mode: 'cloud', dataOwnerId: 'owner', generation: 1 }, boundary: false,
   db: { client: { query: vi.fn() }, clientEpoch: 1 },
   hosts: [] as HostRecord[], dispatch: vi.fn(),
+  captureClose: vi.fn(), close: vi.fn(),
 }));
 vi.mock('../../localDb/client/current.js', () => ({ getCurrentDbClientSnapshot: () => state.db }));
 vi.mock('../../localDb/sessionMeetings.js', () => ({ createSessionMeetingJournal: () => ({}) }));
@@ -22,18 +24,19 @@ vi.mock('../../authManager.js', () => ({
   getDeviceId: () => 'host-device', getActiveAuthRealm: () => state.region,
 }));
 vi.mock('../../logger.js', () => ({ createLogger: () => ({ warn: vi.fn(), debug: vi.fn() }) }));
-vi.mock('../sessionMeetingApi.js', () => ({ sessionMeetingApi: {} }));
+vi.mock('../sessionMeetingApi.js', () => ({ sessionMeetingApi: {}, captureSessionMeetingBoundaryClose: state.captureClose }));
 vi.mock('../sessionMeetingDispatch.js', () => ({ setSessionMeetingDispatchHost: state.dispatch }));
 vi.mock('../sessionMeetingHost.js', () => ({
   SessionMeetingHost: class {
     restore = vi.fn(async () => undefined);
+    closeLocallyForBoundary = vi.fn(async () => ['meeting-a', 'meeting-b']);
     // The real Host disposes each existing grant through this callback.
     dispose = vi.fn(async () => { this.options.revoke('meeting-a'); });
     constructor(readonly options: HostRecord['options']) { state.hosts.push(this); }
   },
 }));
 
-import { requireSessionMeetingHost, startSessionMeetingRuntime, stopSessionMeetingRuntime } from '../sessionMeetingRuntime';
+import { closeSessionMeetingsBeforeLogout, requireSessionMeetingHost, startSessionMeetingRuntime, stopSessionMeetingRuntime } from '../sessionMeetingRuntime';
 
 function start() {
   const client = { hasServerCapability: () => true, getStatus: () => 'online', start: vi.fn(), stop: vi.fn(), revoke: vi.fn() };
@@ -48,6 +51,8 @@ beforeEach(async () => {
   state.session = { mode: 'cloud', dataOwnerId: 'owner', generation: 1 };
   state.db = { client: { query: vi.fn() }, clientEpoch: 1 };
   state.hosts.length = 0; state.dispatch.mockClear();
+  state.captureClose.mockReset().mockReturnValue(state.close);
+  state.close.mockReset().mockResolvedValue({ status: 'closed' });
 });
 afterEach(async () => {
   await stopSessionMeetingRuntime();
@@ -55,6 +60,50 @@ afterEach(async () => {
 });
 
 describe('shared runtime stable owner recommit', () => {
+  it('preserves creation cleanup across same-profile rebind but not database replacement', () => {
+    start();
+    const original = state.hosts[0].options.creationState;
+    state.session.generation++;
+    requireSessionMeetingHost();
+    expect(state.hosts[1].options.creationState).toBe(original);
+    state.db = { client: { query: vi.fn() }, clientEpoch: 2 };
+    start();
+    expect(state.hosts[2].options.creationState).not.toBe(original);
+  });
+  it('persists the outgoing journal before closing all shares with captured old identity', async () => {
+    start();
+    const outgoing = state.hosts[0];
+    let finish!: () => void;
+    outgoing.closeLocallyForBoundary.mockImplementation(() => new Promise<string[]>((resolve) => {
+      finish = () => resolve(['meeting-a', 'meeting-b']);
+    }));
+    state.boundary = true;
+    const closing = closeSessionMeetingsBeforeLogout();
+    expect(state.captureClose).toHaveBeenCalledExactlyOnceWith('owner', 'global');
+    expect(state.close).not.toHaveBeenCalled();
+    // Another binding cannot change which host/journal this cleanup stops.
+    finish();
+    await closing;
+    expect(outgoing.dispose).toHaveBeenCalledOnce();
+    expect(state.close.mock.calls).toEqual([['meeting-a'], ['meeting-b']]);
+  });
+  it('keeps durable cleanup when offline or credentials are already cleared', async () => {
+    start();
+    state.close.mockRejectedValue(new Error('offline'));
+    await expect(closeSessionMeetingsBeforeLogout()).resolves.toBeUndefined();
+    expect(state.hosts[0].closeLocallyForBoundary).toHaveBeenCalledOnce();
+    state.captureClose.mockReturnValue(null);
+    state.close.mockClear();
+    await closeSessionMeetingsBeforeLogout();
+    expect(state.close).not.toHaveBeenCalled();
+  });
+  it('does not report logout complete or send closure before the journal is durable', async () => {
+    start();
+    state.hosts[0].closeLocallyForBoundary.mockRejectedValue(new Error('disk failed'));
+    await expect(closeSessionMeetingsBeforeLogout()).rejects.toThrow('disk failed');
+    expect(state.close).not.toHaveBeenCalled();
+    expect(state.hosts[0].dispose).not.toHaveBeenCalled();
+  });
   it('rebinds on the existing refresh tick without restarting relay or reviving old captures', async () => {
     const relay = start();
     const original = state.hosts[0];

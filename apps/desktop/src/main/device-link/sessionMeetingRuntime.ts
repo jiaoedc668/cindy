@@ -5,8 +5,8 @@ import { activeOwnerScopeKey, getActiveAppSession, isAppSessionBoundaryPending }
 import { getAuthState, getCurrentUserId, getDeviceId, getActiveAuthRealm } from '../authManager.js';
 import { createLogger } from '../logger.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
-import { sessionMeetingApi } from './sessionMeetingApi.js';
-import { SessionMeetingHost } from './sessionMeetingHost.js';
+import { captureSessionMeetingBoundaryClose, sessionMeetingApi } from './sessionMeetingApi.js';
+import { SessionMeetingHost, type SessionMeetingCreationState } from './sessionMeetingHost.js';
 import { setSessionMeetingDispatchHost } from './sessionMeetingDispatch.js';
 
 const log = createLogger('session-meeting');
@@ -14,6 +14,10 @@ interface Binding {
   host: SessionMeetingHost;
   stop(): Promise<void>;
   dbEpoch: number;
+  database: object;
+  creationState: SessionMeetingCreationState;
+  ownerAccountId: string;
+  region: ReturnType<typeof getActiveAuthRealm>;
   current(): boolean;
   rebindIfStable(): void;
 }
@@ -34,6 +38,9 @@ export function startSessionMeetingRuntime(options: {
   const epoch = ++generation;
   const scope = activeOwnerScopeKey();
   const region = getActiveAuthRealm();
+  const creationState = previous?.database === db.client && previous.dbEpoch === db.clientEpoch &&
+    previous.ownerAccountId === ownerAccountId && previous.region === region
+    ? previous.creationState : { pending: new Map(), identities: new Map() };
   let stopped = false;
   let preservePeerLinks = false;
   const current = () => !stopped && generation === epoch && getAuthState().isAuthenticated &&
@@ -42,7 +49,7 @@ export function startSessionMeetingRuntime(options: {
     getCurrentDbClientSnapshot()?.clientEpoch === db.clientEpoch;
   const host = new SessionMeetingHost({
     api: sessionMeetingApi, journal: createSessionMeetingJournal(db.client),
-    ownerAccountId, hostDeviceId: getDeviceId(), isCurrent: current,
+    ownerAccountId, hostDeviceId: getDeviceId(), creationState, isCurrent: current,
     async readSession(sessionId) {
       const rows = await db.client.query<{ id: string; title: string; status: string }>(
         'SELECT id, title, status FROM sessions WHERE id = ? LIMIT 1', [sessionId]);
@@ -82,7 +89,7 @@ export function startSessionMeetingRuntime(options: {
   };
   const timer = setInterval(() => { void refresh(); }, 5_000);
   timer.unref?.();
-  binding = { host, dbEpoch: db.clientEpoch, current, rebindIfStable, stop() {
+  binding = { host, dbEpoch: db.clientEpoch, database: db.client, creationState, ownerAccountId, region, current, rebindIfStable, stop() {
     stopped = true;
     clearInterval(timer);
     if (binding?.host === host) setSessionMeetingDispatchHost(null);
@@ -105,18 +112,26 @@ export function requireSessionMeetingHost(): SessionMeetingHost {
 
 /** Must be awaited before disposing the outgoing profile; disk failure aborts handover. */
 export async function closeSessionMeetingsBeforeLogout(): Promise<void> {
-  if (!binding || binding.dbEpoch !== getCurrentDbClientSnapshot()?.clientEpoch) return;
-  await binding.host.closeLocallyForBoundary();
-  await binding.stop();
+  const outgoing = binding;
+  if (!outgoing || outgoing.dbEpoch !== getCurrentDbClientSnapshot()?.clientEpoch) return;
+  const close = captureSessionMeetingBoundaryClose(outgoing.ownerAccountId, outgoing.region);
+  const ids = await outgoing.host.closeLocallyForBoundary();
+  await outgoing.stop();
+  // Journal first; offline/expired credentials leave a durable retry for restore.
+  // Close concurrently under a bounded old-identity request before logout returns.
+  if (close) {
+    const results = await Promise.allSettled(ids.map((id) => close(id)));
+    if (results.some((result) => result.status === 'rejected')) {
+      log.debug('meeting boundary closure pending; retained journal for retry');
+    }
+  }
 }
 
 /** Terminal task state is durable before this runs; never reopen it on a later restore. */
 export async function closeSessionMeetingForTask(sessionId: string, database: unknown): Promise<void> {
   if (getCurrentDbClientSnapshot()?.client !== database) return;
   if (!binding || binding.dbEpoch !== getCurrentDbClientSnapshot()?.clientEpoch) return;
-  const ids = binding.current() ? binding.host.activeMeetingIds().filter((id) =>
-    binding!.host.detail(id)?.sessionId === sessionId) : [];
-  await binding.host.closeLocallyForBoundary(sessionId);
+  const ids = await binding.host.closeLocallyForBoundary(sessionId);
   // Network failure is retried from the terminal journal; never undo the task archive.
   for (const id of ids) void sessionMeetingApi.close(id).catch(() => undefined);
 }

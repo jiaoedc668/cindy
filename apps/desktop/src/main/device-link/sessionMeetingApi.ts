@@ -1,6 +1,6 @@
 import { createSessionMeetingApi, SessionMeetingScopeChangedError } from '@cindy/device-link';
 import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
-import { getAuthState } from '../authManager.js';
+import { getAccessToken, getActiveAuthRealm, getAuthState, getCurrentUserId } from '../authManager.js';
 import { getClientEndpoint } from '../clientEndpointsService.js';
 import { serverApiFetch } from '../serverApiClient.js';
 
@@ -30,3 +30,22 @@ export const sessionMeetingApi = createSessionMeetingApi({
     });
   },
 });
+
+/** Capture only while the outgoing identity still owns the credentials. Unlike
+ * ordinary requests, this close-only cleanup may cross the pending boundary:
+ * its endpoint/token never refresh, and errors cannot log out the next account. */
+export function captureSessionMeetingBoundaryClose(ownerAccountId: string, region: ReturnType<typeof getActiveAuthRealm>) {
+  if (getCurrentUserId() !== ownerAccountId || getActiveAuthRealm() !== region) return null;
+  const token = getAccessToken();
+  if (!token) return null;
+  const endpoint = getClientEndpoint('deviceLinkApiBaseUrl');
+  const api = createSessionMeetingApi({
+    captureScope: () => ({ isCurrent: () => true }),
+    request: (path, options) => serverApiFetch<unknown>(path, {
+      method: options.method, body: options.body, token, baseUrl: endpoint,
+      skipAutoRefresh: true, skipSessionInvalidation: true, timeoutMs: 3_000,
+      cache: 'no-store', redactErrorDetails: true, logLabel: '/api/device-link/meetings',
+    }),
+  });
+  return (meetingId: string) => api.close(meetingId);
+}
