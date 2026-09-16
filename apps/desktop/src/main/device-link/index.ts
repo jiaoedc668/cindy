@@ -18,6 +18,7 @@ import WebSocket from 'ws';
 import {
   DeviceLinkClient,
   parseMeetingPeer,
+  probeSessionMeetingHost,
   sessionMeetingTopics,
   SESSION_MEETING_CAPABILITY,
   CONTROLLER_CAPABILITY_MAKER_EVENT_BATCH_V1,
@@ -46,7 +47,7 @@ import {
 import { DEVICE_LINK_VOICE_DICTIONARY_SNAPSHOT_CHANNEL } from '@cindy/maker-shared/device-link-contract';
 import * as authManager from '../authManager';
 import { remoteCredentialHost } from '../remote-desktop/credentialHost';
-import { getActiveDataOwnerPushStamp } from '../appSessionState.js';
+import { activeOwnerScopeKey, getActiveDataOwnerPushStamp, isAppSessionBoundaryPending } from '../appSessionState.js';
 import { createLogger } from '../logger';
 import { onQuit } from '../lifecycle';
 import { getCurrentDbClientUserId } from '../localDb/client/current';
@@ -131,6 +132,7 @@ import { resetAll as resetSubscriptionRefs, snapshotSubscriptions } from './subs
 import { getControllersForTopic } from './subscriptions';
 import { getKnownControllerIds } from './subscriptions';
 import { startSessionMeetingRuntime, stopSessionMeetingRuntime } from './sessionMeetingRuntime.js';
+import { sessionMeetingApi } from './sessionMeetingApi.js';
 import {
   MobileNotifyDeduper,
   buildSessionNotifyPayload,
@@ -353,6 +355,9 @@ function refreshControllerDisplayNamesFromDirectory(generation: number): Promise
 }
 
 let client: DeviceLinkClient | null = null;
+// Local IPC metadata, never accepted from a push payload or sent over the wire.
+const sharedHostStreams = new Map<string, { streamId: string; epoch: number }>();
+let sharedHostSourceEpoch = 0;
 
 /**
  * transport-timeout 重开循环(控制端):被控端瞬时重置后 relay/presence 都不会
@@ -707,6 +712,17 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     probeInvoke: (deviceId, channel, args) => {
       if (!client)
         throw new Error('[DEVICE_LINK_NOT_CONNECTED] device-link client not initialized');
+      if (parseMeetingPeer(deviceId)) {
+        const probeClient = client;
+        const scope = activeOwnerScopeKey();
+        return probeSessionMeetingHost(deviceId, {
+          isCurrent: () => client === probeClient && arbiter?.isOwner() === true &&
+            !isAppSessionBoundaryPending() && activeOwnerScopeKey() === scope && !revokedByRemote.has(deviceId),
+          get: (meetingId) => sessionMeetingApi.get(meetingId),
+          openLink: () => probeClient.isLinkReady(deviceId) ? Promise.resolve() : openRemoteLink(deviceId, { observed: false }),
+          invoke: (probeChannel, probeArgs) => probeClient.invoke(deviceId, { channel: probeChannel, args: probeArgs }),
+        });
+      }
       return client.invoke(deviceId, { channel, args }, INVOKE_TIMEOUT_OVERRIDES_MS[channel]);
     },
     onUnresponsiveChanged: (deviceId, unresponsive) => {
@@ -937,6 +953,11 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
   // busy presence:每 5s 探一次本机是否有 turn 在跑,变化才上报(dedupe by value)
   startBusyReporting();
 
+  client.onPeerStreamAccepted((peer, streamId) => {
+    if (parseMeetingPeer(peer)?.role !== 'host' || sharedHostStreams.get(peer)?.streamId === streamId) return;
+    sharedHostStreams.set(peer, { streamId, epoch: ++sharedHostSourceEpoch });
+  });
+
   // 控制端:被控端转发回来的 push 帧 → re-broadcast 给 renderer 远程视图,
   // 带上来源 deviceId(src),renderer 据此把事件路由到对应远程设备的 store
   client.onFrame((env: Envelope) => {
@@ -962,6 +983,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     }
     if (env.kind !== 'push') return;
     const p = env.payload as PushPayload;
+    const sourceEpoch = sharedHostStreams.get(env.src)?.epoch;
     // 词典同步帧在 main 侧消费,不转给 renderer —— 它不是远程视图事件,
     // renderer 也不该看到别的设备的同步状态。
     if (p?.channel === DL_VOICE_DICTIONARY_SYNC_CHANNEL) {
@@ -1002,6 +1024,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
           channel: MAKER_PUSH.EVENT,
           payload: event,
           ...(p.ownerStamp ? { ownerStamp: p.ownerStamp } : {}),
+          ...(sourceEpoch !== undefined ? { sourceEpoch } : {}),
         });
       }
       return;
@@ -1011,6 +1034,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
       channel: p.channel,
       payload: p.payload,
       ...(p.ownerStamp ? { ownerStamp: p.ownerStamp } : {}),
+      ...(sourceEpoch !== undefined ? { sourceEpoch } : {}),
     });
   });
 
@@ -1292,6 +1316,7 @@ function teardownActiveLink(): void {
   subscriptionReplayScheduler.teardown();
   presenceAvailableByDevice.clear();
   revokedByRemote.clear();
+  sharedHostStreams.clear();
   // 词典同步驱动是进程级的,**不随单次链路起停**:多实例仲裁的 demote → acquire
   // 只会 client.start(),不会重跑 initDeviceLinkService,在这里 stop 掉它会让词典
   // 同步在降级过一次之后永久失效。清空 presence 就够了 —— 没有对端就不会发送,

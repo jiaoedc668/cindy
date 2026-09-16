@@ -11,6 +11,7 @@ import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts
 import type { Session } from '@/lib/ccAgent.types';
 import { toast } from '@/lib/toast';
 import { remoteProjectsStore } from './remoteProjectsStore';
+import { bindSharedTaskPushOwner } from '@/lib/remoteDataOwnerPushFence';
 
 /** Invitation secrets remain in this form and the authenticated Main request only. */
 export function JoinSessionMeetingDialog({ open, onOpenChange }: { open: boolean; onOpenChange(open: boolean): void }) {
@@ -56,6 +57,7 @@ export function JoinSessionMeetingDialog({ open, onOpenChange }: { open: boolean
     const detail = await window.electronAPI.sessionMeeting.account({ action: 'get', meetingId: request!.meetingId }) as SessionMeetingDetail;
     if (!current()) return;
     const peer = meetingHostPeer(detail.meetingId);
+    bindSharedTaskPushOwner(peer, detail.ownerAccountId);
     await window.electronAPI.deviceLink.openLink(peer);
     if (!current()) return;
     const session = await window.electronAPI.deviceLink.invoke(peer, 'local-db:sessions:get', [detail.sessionId]) as Session;

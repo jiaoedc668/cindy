@@ -85,7 +85,7 @@ import {
 import { getControllerPlatform } from './controllerPlatform';
 import { getDeviceLinkInvokeContext, runDeviceLinkInvokeContext } from './invoke-context';
 import { isMeetingPeer, SESSION_MEETING_CAPABILITY } from '@cindy/device-link';
-import { captureSessionMeetingPeer, captureSessionMeetingPush, assertSessionMeetingInvoke } from './sessionMeetingDispatch.js';
+import { captureSessionMeetingPeer, captureSessionMeetingPush, assertSessionMeetingInvoke, sessionMeetingMetadataTopic } from './sessionMeetingDispatch.js';
 import { runAsBackgroundDbRpc } from '../localDb/client/rpcAdmission.js';
 import { fetchLocalMediaToOss } from './mediaFetch';
 import { refreshSessionMeetingPeer } from './sessionMeetingDispatch.js';
@@ -1538,6 +1538,7 @@ function stageSessionPatch(dst: string, payload: unknown, ownerStamp?: PushOwner
   const patch = payload as SessionPatch | null;
   if (!patch || typeof patch.sessionId !== 'string' || !patch.sessionId
     || !patch.patch || typeof patch.patch !== 'object' || Array.isArray(patch.patch)) return;
+  const subscriptionTopic = isMeetingPeer(dst) ? sessionMeetingMetadataTopic('local-db:sessions:patched', patch)! : 'sessions';
   let stage = sessionPatchStages.get(dst);
   if (stage && !makerEventBatchOwnerStampEquals(stage.ownerStamp, ownerStamp)) {
     clearSessionPatchStage(dst);
@@ -1548,7 +1549,7 @@ function stageSessionPatch(dst: string, payload: unknown, ownerStamp?: PushOwner
     stage = new SessionPatchStage(ownerStamp,
       () => {
         if (!broadcastTap.isDataOwnerBroadcastScopeCurrent(owner)
-          || !subscriptions.getControllersForTopic('sessions').includes(dst)) {
+          || !subscriptions.getControllersForTopic(subscriptionTopic).includes(dst)) {
           clearSessionPatchStage(dst);
           return false;
         }
@@ -1560,7 +1561,7 @@ function stageSessionPatch(dst: string, payload: unknown, ownerStamp?: PushOwner
         let failure: unknown;
         await sendBotCheckedPush(dst, 'local-db:sessions:patched', item, (projected) => {
           if (!isCurrent() || !broadcastTap.isDataOwnerBroadcastScopeCurrent(owner)
-            || !subscriptions.getControllersForTopic('sessions').includes(dst)) return;
+            || !subscriptions.getControllersForTopic(subscriptionTopic).includes(dst)) return;
           if (!activeClient || activeClient.canSendPush?.(dst) === false) {
             throw new DeviceLinkError('NOT_CONNECTED', 'peer mirror paused');
           }
@@ -1628,6 +1629,10 @@ function drainSessionActivityStage(dst: string, stage: SessionActivityStage): vo
       | undefined;
     if (!next) return;
     const [key, item] = next;
+    if (isMeetingPeer(dst) && !subscriptions.getControllersForTopic(`session:${key}`).includes(dst)) {
+      stage.queue.delete(key);
+      continue;
+    }
     try {
       let backpressured = false;
       sendBotCheckedPush(dst, SESSION_ACTIVITY_CHANNEL, item.payload, (projected) => {
@@ -1753,7 +1758,16 @@ function forwardPush(channel: string, payload: unknown, ownerStamp?: PushOwnerSt
   if (channel === MAKER_PUSH.INTERACTION_DISMISSED) {
     remotePayload = projectInteractionDismissedForRemote(remotePayload);
   }
-  const dsts = subscriptions.getControllersForTopic(topic);
+  const meetingTopic = sessionMeetingMetadataTopic(channel, remotePayload);
+  const targetsFor = (known: boolean): string[] => {
+    const lookup = known ? subscriptions.getKnownControllersForTopic : subscriptions.getControllersForTopic;
+    const ordinary = lookup(topic);
+    if (!meetingTopic) return ordinary;
+    const shared = lookup(meetingTopic).filter((dst) => isMeetingPeer(dst)
+      && captureSessionMeetingPush(dst, channel, remotePayload)?.() === true);
+    return [...new Set([...ordinary, ...shared])];
+  };
+  const dsts = targetsFor(false);
   // The active registry describes peer topic intent, not whether this host can
   // currently write to the relay. During host-side reconnects sendPush is a
   // silent no-op, so route queueable pushes through the offline backlog instead.
@@ -1792,16 +1806,16 @@ function forwardPush(channel: string, payload: unknown, ownerStamp?: PushOwnerSt
   const historySessionId = readPushSessionId(remotePayload);
   const deferred = historySessionId !== null && isDeferredHistoryPush(channel, remotePayload,
     (id) => readHistoryToolName(historySessionId, id));
-  const offlineTargets = subscriptions
-    .getKnownControllersForTopic(topic)
+  const offlineTargets = targetsFor(true)
     .filter((dst) => !liveTargets.includes(dst));
   for (const dst of offlineTargets) {
     if (deferred && historySessionId && subscriptions.hasHistoryView(dst, historySessionId)) continue;
-    if (OFFLINE_QUEUEABLE_PUSH_CHANNELS.has(channel)) {
+    const sharedMetadata = isMeetingPeer(dst) && meetingTopic !== null;
+    if (OFFLINE_QUEUEABLE_PUSH_CHANNELS.has(channel) || sharedMetadata) {
       offlinePushQueue.enqueue(dst, {
         channel,
         payload: payloadFor(dst),
-        topic,
+        topic: sharedMetadata ? meetingTopic : topic,
         ...(ownerStamp ? { ownerStamp } : {}),
       });
     }
@@ -1904,7 +1918,8 @@ function sendPushBestEffortAuthorized(
   const sessionId = readPushSessionId(payload);
   const markForRecovery = () => {
     if (sessionId && channel !== SESSION_SYNC_CHANNEL
-      && topicForPush(channel, payload) === `session:${sessionId}`) {
+      && (topicForPush(channel, payload) === `session:${sessionId}`
+        || isMeetingPeer(dst) && sessionMeetingMetadataTopic(channel, payload) === `session:${sessionId}`)) {
       stageSessionSync(dst, sessionId, channel !== 'maker:event' || !isNonFinalTextPush(payload));
     }
   };

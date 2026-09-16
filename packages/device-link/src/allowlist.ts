@@ -401,6 +401,7 @@ const EXTENDED_INVOKE_CHANNELS: readonly string[] = [
   // 本机查必空)。后台任务面板挂载水合用。老被控端无此 channel → CHANNEL_NOT_ALLOWED
   // → 控制端降级空表(面板退化为事件流 + 消息扫描两源)。
   'maker:session-background-tasks:list',
+  'maker:session-background-activity',
   // Durable PI Subagent truth and process handles live on the data-owning device.
   // Reads and exact controls must execute there; the controller must never fall
   // back to its own pi-agent-home for a remote task.

@@ -10,6 +10,7 @@ import { mobileDebugLog } from '@/debug/mobileDebugLog';
 import {
   DeviceLinkClient,
   isMeetingPeer,
+  probeSessionMeetingHost,
   sessionMeetingTopics,
   SESSION_MEETING_CAPABILITY,
   DeviceLinkError,
@@ -38,6 +39,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { deviceLinkWsUrl, DEVICE_LINK_API_BASE_URL } from '@/config/env';
 import { MOBILE_VISUAL_MOCK_ENABLED } from '@/config/env';
 import { useAuth } from '@/auth/AuthContext';
+import { getMobileAuthOwner, isMobileAuthOwnerCurrent } from '@/auth/authOwnerGeneration';
+import { useSessionMeetingApi } from './useSessionMeetingApi';
 import {
   applyAccessRevokedFrame,
   withAccessRevokedHandling,
@@ -329,6 +332,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
   }
 
   const auth = useAuth();
+  const meetingApi = useSessionMeetingApi();
   const currentDataOwnerIdRef = useRef<string | null>(auth.user?.id ?? null);
   currentDataOwnerIdRef.current = auth.user?.id ?? null;
   const clientRef = useRef<DeviceLinkClient | null>(null);
@@ -509,6 +513,16 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
   const probeUnresponsiveDevice = useCallback(
     async (client: DeviceLinkClient, deviceId: string): Promise<void> => {
       try {
+        if (isMeetingPeer(deviceId)) {
+          const owner = getMobileAuthOwner();
+          await probeSessionMeetingHost(deviceId, {
+            isCurrent: () => clientRef.current === client && isMobileAuthOwnerCurrent(owner),
+            get: (meetingId) => meetingApi.get(meetingId),
+            openLink: () => sendOpenLinkOnce(client, deviceId, true).request,
+            invoke: (channel, args) => sendInvokeWithAccessHandling(client, deviceId, channel, args, { allowProbe: true }),
+          });
+          return;
+        }
         await sendOpenLinkOnce(client, deviceId, true).request;
         await sendInvokeWithAccessHandling(
           client,
@@ -521,7 +535,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
         // swallow — settle 已在 sendOpenLink / sendInvoke 内完成。
       }
     },
-    [sendOpenLinkOnce],
+    [sendOpenLinkOnce, meetingApi],
   );
 
   const hasOutboundPeerRecoveryIntent = useCallback((

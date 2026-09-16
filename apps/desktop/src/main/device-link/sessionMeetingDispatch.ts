@@ -10,6 +10,18 @@ export function captureSessionMeetingPeer(source: string): SessionMeetingPeerCap
   return host?.capturePeer(source) ?? null;
 }
 
+// These existing list events also carry single-task state. Shared peers receive
+// only this explicit subset through their task subscription, never `sessions`.
+const sessionMetadataChannels = new Set([
+  'local-db:sessions:created', 'local-db:sessions:patched', 'local-db:sessions:activity',
+  'local-db:session:error-persisted', 'usage:session-spend-changed', 'usage:session-tokens-changed',
+]);
+export function sessionMeetingMetadataTopic(channel: string, payload: unknown): `session:${string}` | null {
+  const sessionId = record(payload)?.sessionId;
+  return sessionMetadataChannels.has(channel) && typeof sessionId === 'string' && sessionId.length > 0
+    ? `session:${sessionId}` : null;
+}
+
 /** A newly invited device can arrive before the periodic authority refresh. */
 export async function refreshSessionMeetingPeer(source: string): Promise<void> {
   const peer = parseMeetingPeer(source);
@@ -86,6 +98,14 @@ export function assertSessionMeetingInvoke(
   const args = payload.args ?? [];
   if (!Array.isArray(args)) deny();
   const sessionId = capture.author.sessionId;
+  if (['local-db:subagent-runs:list', 'local-db:subagent-runs:detail', 'local-db:subagent-runs:transcript'].includes(channel)) {
+    const request = record(args[0]);
+    if (args.length !== 1 || !request || request.sessionId !== sessionId ||
+        Object.keys(request).some((key) => !['sessionId', 'provider', 'runIdOrAlias', 'cursor', 'limit'].includes(key)) ||
+        !capture.authorize('history.read')) deny();
+    assertSessionMeetingReferences(request, sessionId);
+    return;
+  }
   if (channel === 'device-link:media:fetch') {
     const request = record(args[0]);
     if (args.length !== 1 || !request || typeof request.url !== 'string' ||
@@ -140,7 +160,7 @@ export function captureSessionMeetingPush(source: string, channel: string, paylo
   if (row?.sessionId !== sessionId) return null;
   // Never forward a device/account projection just because it has a sessionId.
   if (!(channel.startsWith('maker:') || channel.startsWith('local-db:messages:') ||
-      channel === 'local-db:sessions:patched' || channel === 'local-db:session:error-persisted' ||
+      sessionMeetingMetadataTopic(channel, payload) !== null ||
       channel.startsWith('usage:message-') || channel === 'usage:session-spend-changed' || channel === 'usage:session-tokens-changed')) return null;
   if (channel === 'maker:event:batch' && (!Array.isArray(row.events) || row.events.some((event) => record(event)?.sessionId !== sessionId))) return null;
   return () => capture.isCurrent();

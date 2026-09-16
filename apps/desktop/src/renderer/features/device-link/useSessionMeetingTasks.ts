@@ -4,6 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts/dataOwnerGeneration';
 import type { Session } from '@/lib/ccAgent.types';
 import { remoteProjectsStore } from './remoteProjectsStore';
+import { bindSharedTaskPushOwner, resetRemoteDataOwnerPushFence } from '@/lib/remoteDataOwnerPushFence';
 
 /** Meeting peers have their own authority list, independent of the user's device directory. */
 export function useSessionMeetingTasks(): void {
@@ -26,12 +27,14 @@ export function useSessionMeetingTasks(): void {
         for (const id of remoteProjectsStore.getAllDeviceIds()) {
           if (!parseMeetingPeer(id) || current.has(id)) continue;
           linked.delete(id);
+          resetRemoteDataOwnerPushFence(id);
           remoteProjectsStore.removeDevice(id);
           void window.electronAPI.deviceLink.closeLink(id);
         }
         for (const meeting of meetings) {
           if (!currentOwner()) return;
           const peer = meetingHostPeer(meeting.meetingId);
+          bindSharedTaskPushOwner(peer, meeting.ownerAccountId);
           try {
             if (!linked.has(peer)) {
               await window.electronAPI.deviceLink.openLink(peer);
@@ -61,6 +64,7 @@ export function useSessionMeetingTasks(): void {
         if (!isDataOwnerGenerationCurrent(owner)) break;
         void window.electronAPI.deviceLink.unsubscribe(peer, ['session:' + sessionId]).catch(() => undefined);
         remoteProjectsStore.removeDevice(peer);
+        resetRemoteDataOwnerPushFence(peer);
       }
     };
   }, [dataOwnerId, ownerGeneration, dataOwnerRecoveryEpoch, isAuthenticated]);

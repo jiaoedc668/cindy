@@ -1,7 +1,7 @@
 import { SESSION_MEETING_CAPABILITY, type DeviceLinkClient } from '@cindy/device-link';
 import { getCurrentDbClientSnapshot } from '../localDb/client/current.js';
 import { createSessionMeetingJournal } from '../localDb/sessionMeetings.js';
-import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
+import { activeOwnerScopeKey, getActiveAppSession, isAppSessionBoundaryPending } from '../appSessionState.js';
 import { getAuthState, getCurrentUserId, getDeviceId, getActiveAuthRealm } from '../authManager.js';
 import { createLogger } from '../logger.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
@@ -15,6 +15,7 @@ interface Binding {
   stop(): Promise<void>;
   dbEpoch: number;
   current(): boolean;
+  rebindIfStable(): void;
 }
 let binding: Binding | null = null;
 let generation = 0;
@@ -34,7 +35,9 @@ export function startSessionMeetingRuntime(options: {
   const scope = activeOwnerScopeKey();
   const region = getActiveAuthRealm();
   let stopped = false;
+  let preservePeerLinks = false;
   const current = () => !stopped && generation === epoch && getAuthState().isAuthenticated &&
+    getCurrentUserId() === ownerAccountId &&
     !isAppSessionBoundaryPending() && activeOwnerScopeKey() === scope && getActiveAuthRealm() === region &&
     getCurrentDbClientSnapshot()?.clientEpoch === db.clientEpoch;
   const host = new SessionMeetingHost({
@@ -45,10 +48,31 @@ export function startSessionMeetingRuntime(options: {
         'SELECT id, title, status FROM sessions WHERE id = ? LIMIT 1', [sessionId]);
       return rows[0] ?? null;
     },
-    revoke: options.revoke, changed: options.changed,
+    revoke: (meetingId, memberId) => {
+      // A stable projection recommit replaces authority captures, not members.
+      // Sending a permanent 'revoked' close here would strand valid guests.
+      if (!preservePeerLinks) options.revoke(meetingId, memberId);
+    },
+    changed: options.changed,
   });
   let refreshing = false;
+  // A same-account stable projection can advance its generation without
+  // transferring the relay lease. Retire the old Host rather than relaxing
+  // its captured scope, so already-admitted callbacks remain invalid forever.
+  const rebindIfStable = () => {
+    if (stopped || generation !== epoch || binding?.host !== host || current() ||
+        isAppSessionBoundaryPending() || !getAuthState().isAuthenticated ||
+        getCurrentUserId() !== ownerAccountId || getActiveAuthRealm() !== region) return;
+    const active = getActiveAppSession();
+    const latestDb = getCurrentDbClientSnapshot();
+    if (active.mode !== 'cloud' || active.dataOwnerId !== ownerAccountId ||
+        latestDb?.client !== db.client || latestDb.clientEpoch !== db.clientEpoch ||
+        activeOwnerScopeKey() === scope) return;
+    preservePeerLinks = true;
+    startSessionMeetingRuntime(options);
+  };
   const refresh = async () => {
+    if (!current()) { rebindIfStable(); return; }
     if (refreshing || !current() || !options.client.hasServerCapability(SESSION_MEETING_CAPABILITY) ||
         options.client.getStatus() !== 'online') return;
     refreshing = true;
@@ -58,7 +82,7 @@ export function startSessionMeetingRuntime(options: {
   };
   const timer = setInterval(() => { void refresh(); }, 5_000);
   timer.unref?.();
-  binding = { host, dbEpoch: db.clientEpoch, current, stop() {
+  binding = { host, dbEpoch: db.clientEpoch, current, rebindIfStable, stop() {
     stopped = true;
     clearInterval(timer);
     if (binding?.host === host) setSessionMeetingDispatchHost(null);
@@ -74,6 +98,7 @@ export function stopSessionMeetingRuntime(): Promise<void> {
 }
 
 export function requireSessionMeetingHost(): SessionMeetingHost {
+  binding?.rebindIfStable();
   if (!binding?.current()) throwIpcError('PRECONDITION_FAILED', 'Meeting host is unavailable');
   return binding.host;
 }

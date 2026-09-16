@@ -6954,6 +6954,7 @@ type LiveIngressContext = {
   ownerStamp?: unknown;
   remoteDeviceId?: string;
   ownerStampPresent?: boolean;
+  sourceEpoch?: number;
 };
 
 function isCurrentLiveIngress(context?: LiveIngressContext): boolean {
@@ -6965,7 +6966,7 @@ function isCurrentLiveIngress(context?: LiveIngressContext): boolean {
     return !hasStamp || isDataOwnerPushStampCurrent(context.ownerStamp);
   }
 
-  return isRemoteDataOwnerPushCurrent(context.remoteDeviceId, context.ownerStamp, hasStamp);
+  return isRemoteDataOwnerPushCurrent(context.remoteDeviceId, context.ownerStamp, hasStamp, context.sourceEpoch);
 }
 
 function isCurrentLocalLiveIngress(ownerStamp: unknown): boolean {
@@ -6977,6 +6978,7 @@ function isCurrentLocalLiveIngress(ownerStamp: unknown): boolean {
 
 function sameLiveIngressScope(a: LiveIngressContext, b: LiveIngressContext): boolean {
   if (a.remoteDeviceId !== b.remoteDeviceId) return false;
+  if (a.sourceEpoch !== b.sourceEpoch) return false;
   const aStamp = isDataOwnerPushStamp(a.ownerStamp) ? a.ownerStamp : null;
   const bStamp = isDataOwnerPushStamp(b.ownerStamp) ? b.ownerStamp : null;
   if (aStamp === null || bStamp === null) return aStamp === bStamp;
@@ -8491,12 +8493,14 @@ function initGlobalListeners(options: GlobalListenerOptions = {}): void {
         channel?: string;
         payload?: unknown;
         ownerStamp?: unknown;
+        sourceEpoch?: number;
       } | null;
       if (!push?.channel) return;
       const remoteIngress: LiveIngressContext = push.deviceId
         ? {
             remoteDeviceId: push.deviceId,
             ownerStamp: push.ownerStamp,
+            sourceEpoch: push.sourceEpoch,
             ownerStampPresent: Object.prototype.hasOwnProperty.call(push, 'ownerStamp'),
           }
         : {};

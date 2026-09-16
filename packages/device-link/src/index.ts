@@ -27,3 +27,4 @@ export * from './remoteClipboard.js';
 export * from './remoteCursor.js';
 export * from './sessionMeeting.js';
 export * from './sessionMeetingApi.js';
+export * from './sessionMeetingProbe.js';

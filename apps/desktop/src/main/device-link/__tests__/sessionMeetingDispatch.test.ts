@@ -10,6 +10,16 @@ function capture(): SessionMeetingPeerCapture {
 }
 afterEach(() => setSessionMeetingQueueReader(null));
 describe('meeting dispatch scope', () => {
+  it('reads subagent context only through the shared parent task', () => {
+    for (const channel of ['local-db:subagent-runs:list', 'local-db:subagent-runs:detail', 'local-db:subagent-runs:transcript']) {
+      const request = { sessionId: 'task', provider: 'pi', runIdOrAlias: 'child' };
+      expect(() => assertSessionMeetingInvoke(capture(), { channel, args: [request] })).not.toThrow();
+      for (const args of [[{ ...request, sessionId: 'other' }], [{ ...request, path: '/private' }], [request, 'other']]) {
+        expect(() => assertSessionMeetingInvoke(capture(), { channel, args })).toThrow();
+      }
+      expect(() => assertSessionMeetingInvoke({ ...capture(), isCurrent: () => false }, { channel, args: [request] })).toThrow();
+    }
+  });
   it('allows only existing references from the member own pending row when editing', () => {
     const payload = { channel: 'maker:input:update-content', args: ['task', 'message', { files: [{ path: '/host/cache/a.png' }] }] };
     setSessionMeetingQueueReader((_sid, clientId) => clientId === 'message' ? { sessionId: 'task', authorAccountId: 'guest', state: 'pending', attachments: [{ path: '/host/cache/a.png' }] } : undefined);
