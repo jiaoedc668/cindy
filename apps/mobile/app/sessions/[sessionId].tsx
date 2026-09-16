@@ -3,7 +3,7 @@ import { FailedScheduleNotice } from '@/session/FailedScheduleNotice';
 import { shouldShowFailedScheduleNotice, type FailedScheduleRunSnapshot } from '@cindy/maker-shared/schedule-model';
 import { useRemoteResourceSession } from '@/session/useRemoteResourceSession';
 import { mobileDebugLog } from '@/debug/mobileDebugLog';
-import { isInFlightDeviceLinkError } from '@cindy/device-link';
+import { isInFlightDeviceLinkError, isMeetingPeer } from '@cindy/device-link';
 import { takeRefinementContextTail, truncateRefinementReply } from '@cindy/voice-input-core';
 import {
   ArrowDown,
@@ -1308,6 +1308,7 @@ export default function SessionScreen() {
     getPendingUploadCount,
   } = useMobileLocalAttachments({
     attachmentScopeKey: sessionId,
+    deviceId,
     getAccessToken: () => auth.getAccessToken(),
     getAttachmentCount: () => attachmentsRef.current.length,
     onUploaded: (rawAttachment, candidate, localId) => {
@@ -2301,12 +2302,12 @@ export default function SessionScreen() {
     () => buildSessionOperationLayout({
       hasCurrentSession,
       hasActivePendingInteraction,
-      pendingInteractionBlocksComposer,
+      pendingInteractionBlocksComposer: pendingInteractionBlocksComposer && !isMeetingPeer(deviceId),
       remoteUnavailableReason: composerRemoteUnavailableReason,
       // composer 用 composer-only reason:Lead → editable(可发消息),worker → read-only。
       readOnlyReason: composerReadOnlyReason,
     }),
-    [composerReadOnlyReason, composerRemoteUnavailableReason, hasActivePendingInteraction, hasCurrentSession, pendingInteractionBlocksComposer],
+    [composerReadOnlyReason, composerRemoteUnavailableReason, hasActivePendingInteraction, hasCurrentSession, pendingInteractionBlocksComposer, deviceId],
   );
   useEffect(() => {
     if (!pendingInteractionActiveRequestId) return;
@@ -6734,6 +6735,7 @@ export default function SessionScreen() {
   // 权限模式图标钮(2026-07-29 用户裁决,对齐 Codex,与新建页同位同款):
   // 只显示档位图标,不带文字;危险档(auto / bypass)只染图标色。
   const renderSessionPermissionButton = () => {
+    if (isMeetingPeer(deviceId)) return null;
     const presentation = permissionPresentation(displayPermissionMode, displayPermissionLabel);
     const accent = presentation.accent !== 'neutral'
       ? permissionAccentColor(presentation.accent, colors)
@@ -6771,7 +6773,7 @@ export default function SessionScreen() {
       <ComposerToolbarLeftGroup testID="session.composerToolbarLeft">
         {renderComposerAttachmentButton()}
         {renderSessionPermissionButton()}
-        {!sessionManagedByHost && planModeOn ? (
+        {!isMeetingPeer(deviceId) && !sessionManagedByHost && planModeOn ? (
           <PlanModeChip
             disabled={controlBusy || !canUseRemoteSessionControls}
             onExit={() => togglePlanMode(false)}
@@ -8967,6 +8969,10 @@ export default function SessionScreen() {
         </View>
         {currentSession && !sessionManagedByHost ? (
           <SessionMenuSheet
+            onOpenSharing={() => {
+              setSettingsOpen(false);
+              router.push({ pathname: '/shared-session', params: { sessionId, deviceId } });
+            }}
             usageReader={maker}
             accountProvider={accountProvider}
             accountUsage={localCodexRateLimitControl ? accountUsage : null}
@@ -9077,7 +9083,7 @@ export default function SessionScreen() {
                   testID="session.contextSheetPhotos"
                 />
               ) : null}
-              {!sessionManagedByHost ? <ContextSheetGroup label={t('session.common.groupMode')}>
+              {!isMeetingPeer(deviceId) && !sessionManagedByHost ? <ContextSheetGroup label={t('session.common.groupMode')}>
                 {planModeSupported ? (
                   // 点击即切换计划模式并关面板(产品决策,不做开关);已开启时显示 ✓,再点退出。
                   <ContextSheetRow
@@ -9325,14 +9331,14 @@ export default function SessionScreen() {
                     loadEarlierProgressKey={oldestLoadedMessageCursor}
                     onCopyMessageLink={copyMessageLink}
                     onAddMessageToComposer={canUseComposer ? addMessageToComposer : undefined}
-                    onDeleteMessage={collaborationReadOnlyReason ? undefined : deleteMessage}
-                    onForkMessage={collaborationReadOnlyReason ? undefined : forkAtMessage}
+                    onDeleteMessage={collaborationReadOnlyReason || isMeetingPeer(deviceId) ? undefined : deleteMessage}
+                    onForkMessage={collaborationReadOnlyReason || isMeetingPeer(deviceId) ? undefined : forkAtMessage}
                     onLoadEarlier={loadEarlierMessages}
                     onLoadToolInput={loadToolInput}
                     onOpenForkOrigin={forkOrigin ? openForkOrigin : undefined}
                     onBlockingOverlayChange={handleMessageBlockingOverlayChange}
                     onOpenSessionLink={openSessionLink}
-                    onPreviewRewind={collaborationReadOnlyReason ? undefined : previewRewindAtMessage}
+                    onPreviewRewind={collaborationReadOnlyReason || isMeetingPeer(deviceId) ? undefined : previewRewindAtMessage}
                     onEnterShareSelection={enterShareSelection}
                     onVisibleShareableMessageIdsReaderChange={handleVisibleShareableMessageIdsReaderChange}
                     shareSelectionActive={shareSelectionActive}

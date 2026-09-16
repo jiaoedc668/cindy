@@ -47,6 +47,7 @@ import { MainWindowActionGroup } from '@/components/MobilePrimitives';
 import type { MobileMakerTransport, RemoteDirectoryEntry } from '@/device-link/mobileMakerTransport';
 import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-link-contract';
 import { projectDraftSessionTitle } from '@cindy/maker-shared/session-title';
+import { isMeetingPeer } from '@cindy/device-link';
 import { computeContextSheetSnapHeights, type ContextSheetSnap } from '@/session/contextSheetModel';
 import { writeClipboardText } from '@/session/messageActions';
 import { normalizeExtraDirs } from '@/session/newSession';
@@ -128,6 +129,7 @@ export interface SessionMenuSheetProps {
   onOpenWorkspace(): void;
   /** Pi 原生会话树入口；只有 host runtime 真正返回 Pi 会话时由父级注入。 */
   onOpenSessionTree?: () => void;
+  onOpenSharing?: () => void;
   onTogglePinned(): void;
   onArchive(): void;
   onRestore(): void;
@@ -159,6 +161,7 @@ export function SessionMenuSheet({
   onRegenerateTitle,
   onOpenWorkspace,
   onOpenSessionTree,
+  onOpenSharing,
   onTogglePinned,
   onArchive,
   onRestore,
@@ -472,10 +475,11 @@ export function SessionMenuSheet({
     [codexRateLimits, i18nInstance.language],
   );
   const workspace = buildSessionInfoWorkspace(session);
-  const showExtraDirs = sessionInfoShowsExtraDirs(session);
+  const sharedGuest = isMeetingPeer(session.deviceLinkDeviceId ?? '');
+  const showExtraDirs = !sharedGuest && sessionInfoShowsExtraDirs(session);
 
-  const mainActions = actions.filter((action) => action.id !== 'delete');
-  const deleteAction = actions.find((action) => action.id === 'delete');
+  const mainActions = actions.filter((action) => sharedGuest ? action.id === 'copyLink' : action.id !== 'delete');
+  const deleteAction = sharedGuest ? undefined : actions.find((action) => action.id === 'delete');
 
   const confirmCodexReset = useCallback(() => {
     if (!resetSummary?.canReset || codexResetBusy) return;
@@ -565,6 +569,8 @@ export function SessionMenuSheet({
           <SessionUsageSummary session={session} usage={menuUsage} contextUsage={contextUsage} onPress={openInfo} />
 
           <View style={styles.actionGroup}>
+            {onOpenSharing && <MenuActionRow icon={Link2} label={t('sessionMeeting.title')}
+              onPress={onOpenSharing} testID="session.sharingButton" />}
             {mainActions.map((action) => (
               <MenuActionRow
                 key={action.id}
@@ -579,7 +585,7 @@ export function SessionMenuSheet({
             ))}
           </View>
 
-          {session.agentKind === 'pi' && onOpenSessionTree ? (
+          {!sharedGuest && session.agentKind === 'pi' && onOpenSessionTree ? (
             <View style={styles.actionGroup}>
               <MenuActionRow
                 icon={GitBranch}
@@ -677,6 +683,7 @@ export function SessionMenuSheet({
           <View style={styles.infoActionRow}>
             <MenuPillButton
               label={t('session.menu.openDir')}
+              disabled={sharedGuest}
               onPress={onOpenWorkspace}
               testID="session.openWorkspaceButton"
             />

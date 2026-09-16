@@ -25,7 +25,8 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { Text } from '@/components/AppText';
-import { DeviceLinkError, type DeviceView, type PresenceSnapshot } from '@cindy/device-link';
+import { DeviceLinkError, isMeetingPeer, type DeviceView, type PresenceSnapshot } from '@cindy/device-link';
+import { useSharedTasks } from '@/device-link/useSharedTasks';
 import {
   Archive,
   Check,
@@ -350,6 +351,7 @@ class HomeSyncScopeSupersededError extends Error {
 }
 
 export default function HomeScreen() {
+  useSharedTasks();
   const screenFocused = useIsFocused();
   return (
     <RemoteSessionStoreSubscriptionGate enabled={screenFocused}>
@@ -994,7 +996,7 @@ function HomeScreenContent() {
       const ghostDeviceIds = new Set<string>();
       for (const session of remoteSessionStore.getSessions()) {
         const shardId = session.deviceLinkDeviceId;
-        if (shardId && !knownDeviceIds.has(shardId)) ghostDeviceIds.add(shardId);
+        if (shardId && !isMeetingPeer(shardId) && !knownDeviceIds.has(shardId)) ghostDeviceIds.add(shardId);
       }
       for (const deviceId of ghostDeviceIds) {
         invalidateScheduleIndexForDevice(deviceId);
@@ -2839,6 +2841,12 @@ function HomeScreenContent() {
         onOpenSettings={() => {
           pendingMenuActionRef.current = null;
           guardedPush('/settings');
+          setChromeMenuCloseInstant(true);
+          setChromeMenuOpen(false);
+        }}
+        onOpenSharedSession={() => {
+          pendingMenuActionRef.current = null;
+          guardedPush('/shared-session');
           setChromeMenuCloseInstant(true);
           setChromeMenuOpen(false);
         }}

@@ -247,6 +247,7 @@ type MakerSendOptions = {
   /** Coordinator-transmitted provenance for device-link input.enqueue. */
   fromDeviceLinkClient?: boolean;
   persistUserMessage?: {
+    meetingAuthor?: AgentInputQueuedMessage['meetingAuthor'];
     clientId?: unknown;
     content?: unknown;
     agentFacingWireContent?: unknown;
@@ -486,6 +487,7 @@ type ResolveSessionResult =
   | { kind: 'failure'; result: DesktopMakerSendResult };
 
 function readPersistUserMessageOption(sendOpts: MakerSendOptions): {
+  meetingAuthor?: AgentInputQueuedMessage['meetingAuthor'];
   clientId: string;
   content: unknown;
   agentFacingWireContent?: IpcUserMessage;
@@ -505,6 +507,7 @@ function readPersistUserMessageOption(sendOpts: MakerSendOptions): {
   const persist = sendOpts.persistUserMessage;
   if (!persist || typeof persist.clientId !== 'string') return null;
   return {
+    ...(persist.meetingAuthor ? { meetingAuthor: persist.meetingAuthor } : {}),
     clientId: persist.clientId,
     content: persist.content,
     ...(persist.agentFacingWireContent && typeof persist.agentFacingWireContent === 'object'
@@ -1387,6 +1390,7 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
                       role: 'user',
                       content: persistUserMessage.content,
                       agentMeta: {
+                        ...(persistUserMessage.meetingAuthor ? { meetingAuthor: persistUserMessage.meetingAuthor } : {}),
                         uuid: so.messageUuid,
                         ...(trustedUserText !== undefined ? { autoReviewUserText: trustedUserText } : {}),
                         sdkSessionId: persistUserMessage.sdkSessionId,

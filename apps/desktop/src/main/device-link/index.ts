@@ -17,6 +17,9 @@ import { app, BrowserWindow } from 'electron';
 import WebSocket from 'ws';
 import {
   DeviceLinkClient,
+  parseMeetingPeer,
+  sessionMeetingTopics,
+  SESSION_MEETING_CAPABILITY,
   CONTROLLER_CAPABILITY_MAKER_EVENT_BATCH_V1,
   CONTROLLER_CAPABILITY_SESSION_TEXT_SNAPSHOT_V1,
   CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
@@ -126,6 +129,8 @@ import {
 import { onVoiceInputDictionaryChanged } from '../voice-input/VoiceInputDataStore';
 import { resetAll as resetSubscriptionRefs, snapshotSubscriptions } from './subscriptionRefcount';
 import { getControllersForTopic } from './subscriptions';
+import { getKnownControllerIds } from './subscriptions';
+import { startSessionMeetingRuntime, stopSessionMeetingRuntime } from './sessionMeetingRuntime.js';
 import {
   MobileNotifyDeduper,
   buildSessionNotifyPayload,
@@ -498,6 +503,7 @@ const RESPONSIVENESS_PROBE_TICK_MS = 5_000;
  * 必须用同一份 —— 只在一处声明会让另一条路径静默降级(mobile 侧 review 实测过这个坑)。
  */
 const CONTROLLER_CAPABILITIES = [
+  SESSION_MEETING_CAPABILITY,
   CONTROLLER_CAPABILITY_SESSION_TEXT_SNAPSHOT_V1,
   CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
   CONTROLLER_CAPABILITY_SET_MODEL_EXPLICIT_PROVIDER_NULL_V1,
@@ -657,6 +663,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
       return ok ? authManager.getAccessToken() : null;
     },
     getHello: (): HelloPayload => ({
+      capabilities: [SESSION_MEETING_CAPABILITY],
       deviceName: deviceName(),
       platform: process.platform,
       appVersion: app.getVersion(),
@@ -1079,6 +1086,20 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
       // 认领成功但期间已登出:不连(登出路径已 stop 仲裁,这里是 tick 竞态兜底)
       if (!authManager.getAuthState().isAuthenticated) return;
       linkTornDown = false;
+      if (client) startSessionMeetingRuntime({
+        client,
+        revoke(meetingId, memberId) {
+          for (const id of getKnownControllerIds()) {
+            const peer = parseMeetingPeer(id);
+            if (!peer || peer.role !== 'guest' || peer.meetingId !== meetingId ||
+                memberId && peer.memberId !== memberId) continue;
+            purgeRevokedController(id);
+            forgetControllerInvokeState(id);
+            client?.closeLink(id, 'revoked', 'inbound');
+          }
+        },
+        changed(meetingId) { broadcast('session-meeting:changed', { meetingId }); },
+      });
       client?.start();
       stopNetworkWatch?.();
       stopNetworkWatch = watchNetworkChanges(() => {
@@ -1253,6 +1274,7 @@ export function getMobileNotifyGeneration(): number {
  * 同进程换账号登录还会把上一账号的控制端串到新账号。
  */
 function teardownActiveLink(): void {
+  void stopSessionMeetingRuntime().catch((error) => log.warn('meeting runtime teardown failed', error));
   remoteCredentialHost.dispose();
   stopNetworkWatch?.();
   stopNetworkWatch = null;
@@ -1310,6 +1332,11 @@ function cancelSubscriptionReplay(deviceId: string): void {
 
 export function getDeviceLinkStatus(): DeviceLinkStatus {
   return client?.getStatus() ?? 'stopped';
+}
+
+export function isSessionMeetingAvailable(): boolean {
+  return !linkTornDown && !!client?.hasServerCapability(SESSION_MEETING_CAPABILITY) &&
+    authManager.getAuthState().isAuthenticated;
 }
 
 /** 当前被熔断判定为「无响应」的目标设备(控制端本地判定,供 getState / UI 镜像)。 */
@@ -1732,6 +1759,7 @@ export async function remoteSubscribe(
   deviceId: string,
   topics: string[],
 ): Promise<InvokeResultPayload> {
+  topics = sessionMeetingTopics(deviceId, topics);
   assertNotStandby();
   assertRemoteControlTargetEnabled(deviceId);
   if (!client) throw new Error('[DEVICE_LINK_NOT_CONNECTED] device-link client not initialized');
@@ -1790,6 +1818,7 @@ export async function remoteUnsubscribe(
   deviceId: string,
   topics: string[],
 ): Promise<InvokeResultPayload> {
+  topics = sessionMeetingTopics(deviceId, topics);
   assertNotStandby();
   if (!client) throw new Error('[DEVICE_LINK_NOT_CONNECTED] device-link client not initialized');
   return client.invoke(deviceId, { channel: DL_UNSUBSCRIBE_CHANNEL, args: [{ topics }] });

@@ -34,6 +34,8 @@ import { materializeSshRemoteMedia } from '../file-browser/ssh-media.js';
 import { getSessionFsSnapshot } from '../localDb/ipc/sessions.js';
 import { uploadLocalFile } from './mediaTransfer.js';
 import { createLogger } from '../logger.js';
+import { getDeviceLinkInvokeContext } from './invoke-context.js';
+import { sessionMeetingMediaId, withSessionMeetingMedia } from './sessionMeetingMediaContext.js';
 
 const log = createLogger('device-link:mediaFetch');
 
@@ -295,6 +297,14 @@ export async function fetchLocalMediaToOss(arg: unknown): Promise<MediaFetchResu
     : {};
   const url = record.url;
   if (typeof url !== 'string' || !url) throw new Error('media:fetch 缺少 url');
+  const meeting = getDeviceLinkInvokeContext()?.meeting;
+  let sharedRoot: string | undefined;
+  if (meeting) {
+    const { assertSharedTaskMedia } = await import('./sessionMeetingMediaAccess.js');
+    sharedRoot = await assertSharedTaskMedia(url, meeting);
+  }
+  const mediaScope = meeting?.author.meetingId ?? sessionMeetingMediaId();
+  const cacheKey = mediaScope ? `${mediaScope}:${url}` : url;
   const skipCache = record.skipCache === true;
   const isPathMedia = url.startsWith('xdt-file://') || url.startsWith('xdt-audio://');
   const sshOrigin = isPathMedia ? await parseSshMediaOrigin(url) : null;
@@ -346,6 +356,9 @@ export async function fetchLocalMediaToOss(arg: unknown): Promise<MediaFetchResu
       throw new Error('媒体文件不存在或不可读');
     }
     // realpath 再查:挡字面形式看似无害的 symlink 逃逸。
+    if (sharedRoot && !isInsideRealDir(real, sharedRoot)) {
+      throw new Error('[PERMISSION_DENIED] Media left the shared task workdir');
+    }
     if (!isPathAllowedAgainst(real, getSensitiveMediaBlocklist())) {
       log.warn(`media:fetch blocked sensitive realpath ${url.slice(0, 60)}`);
       throw new Error('该路径位于敏感目录,已阻止远程取件');
@@ -413,7 +426,7 @@ export async function fetchLocalMediaToOss(arg: unknown): Promise<MediaFetchResu
   if (cacheable) {
     st = await stat(absPath);
     if (!skipCache) {
-      const hit = lookupUploadCache(url, st.size, st.mtimeMs, Date.now());
+      const hit = lookupUploadCache(cacheKey, st.size, st.mtimeMs, Date.now());
       if (hit) {
         log.debug(`media:fetch cache hit ${url.slice(0, 40)} → ossKey=${hit.ossKey}`);
         return { ossKey: hit.ossKey, mimeType: hit.mimeType, size: hit.size };
@@ -421,12 +434,13 @@ export async function fetchLocalMediaToOss(arg: unknown): Promise<MediaFetchResu
     }
   }
 
-  const uploaded = await uploadLocalFile(absPath, {
+  if (meeting && !meeting.isCurrent()) throw new Error('[PERMISSION_DENIED] Shared task access revoked');
+  const uploaded = await withSessionMeetingMedia(meeting?.author.meetingId, () => uploadLocalFile(absPath, {
     ...(mimeType ? { contentType: mimeType } : {}),
     ...(uploadExtHint ? { extHint: uploadExtHint } : {}),
-  });
+  }));
   if (cacheable && st) {
-    rememberUpload(url, {
+    rememberUpload(cacheKey, {
       ossKey: uploaded.key,
       mimeType: uploaded.contentType,
       size: uploaded.size,

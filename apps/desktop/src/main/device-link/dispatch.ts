@@ -83,9 +83,12 @@ import {
   hasRemoteBotSessionLookup, setRemoteBotSessionLookup,
 } from './remoteBotSessionBoundary.js';
 import { getControllerPlatform } from './controllerPlatform';
-import { runDeviceLinkInvokeContext } from './invoke-context';
+import { getDeviceLinkInvokeContext, runDeviceLinkInvokeContext } from './invoke-context';
+import { isMeetingPeer, SESSION_MEETING_CAPABILITY } from '@cindy/device-link';
+import { captureSessionMeetingPeer, captureSessionMeetingPush, assertSessionMeetingInvoke } from './sessionMeetingDispatch.js';
 import { runAsBackgroundDbRpc } from '../localDb/client/rpcAdmission.js';
 import { fetchLocalMediaToOss } from './mediaFetch';
+import { refreshSessionMeetingPeer } from './sessionMeetingDispatch.js';
 import { transcribeRemoteVoiceInput } from './voiceTranscribe';
 import { readTelegramRemoteStatus, setTelegramRemoteOnline } from './telegramRemoteControl';
 import { adviseAndRecordVoiceInputDictionaryLearning } from '../voice-input/index.js';
@@ -171,6 +174,10 @@ function sendBotCheckedPush(
   dst: string, channel: string, payload: unknown, send: (payload: unknown) => void,
   failed: (error: unknown) => void,
 ): void | Promise<void> {
+  const meetingFence = captureSessionMeetingPush(dst, channel, payload);
+  if (!meetingFence) return;
+  const deliver = send;
+  send = (projected) => { if (meetingFence()) deliver(projected); };
   if (!hasRemoteBotSessionLookup()) { send(payload); return; }
   let size: number;
   try { size = byteLength(JSON.stringify(payload)); } catch (error) { failed(error); return; }
@@ -908,7 +915,9 @@ function shouldAcquireRemoteInvokeBusyLease(
   payload: InvokePayload | undefined,
 ): boolean {
   if (!payload || typeof payload.channel !== 'string') return false;
-  if (!readDeviceLinkSettings().remoteControlEnabled) return false;
+  if (isMeetingPeer(src)) {
+    if (!captureSessionMeetingPeer(src)?.isCurrent()) return false;
+  } else if (!readDeviceLinkSettings().remoteControlEnabled) return false;
   if (isControllerRevoked(src)) return false;
   if (!REMOTE_INVOKE_ALLOWLIST.has(payload.channel)) return false;
   if (
@@ -2266,11 +2275,13 @@ function isControllerRevoked(deviceId: string): boolean {
  */
 const LINK_ACCEPT_RETRY_DELAYS_MS: readonly number[] = [500, 1_000, 2_000];
 const linkAcceptRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingMeetingOpens = new Map<string, object>();
 /** 已撤权控制端反复 open 时，closeLink 与 warn 的最小间隔。 */
 const REVOKED_LINK_OPEN_REJECT_INTERVAL_MS = 30_000;
 const revokedLinkOpenRejectAt = new Map<string, number>();
 
 function cancelLinkAcceptRetry(src: string): void {
+  pendingMeetingOpens.delete(src);
   const timer = linkAcceptRetryTimers.get(src);
   if (!timer) return;
   clearTimeout(timer);
@@ -2278,6 +2289,7 @@ function cancelLinkAcceptRetry(src: string): void {
 }
 
 function cancelAllLinkAcceptRetries(): void {
+  pendingMeetingOpens.clear();
   for (const src of [...linkAcceptRetryTimers.keys()]) cancelLinkAcceptRetry(src);
 }
 
@@ -2313,9 +2325,52 @@ function handleLinkOpen(
   requestId: string,
   payload: LinkOpenPayload | undefined,
   acceptAttempt = 0,
+  authorityReady = false,
 ): void {
   // 同 src 的新 link-open / 本轮执行顶掉遗留的 accept 重试(requestId 已过时)
   cancelLinkAcceptRetry(src);
+  // Cross-account logical peers never enter the same-account legacy wildcard.
+  if (isMeetingPeer(src)) {
+    if (!authorityReady) {
+      const attempt = {};
+      const epoch = client.getConnectionEpoch();
+      pendingMeetingOpens.set(src, attempt);
+      const current = () => pendingMeetingOpens.get(src) === attempt && activeClient === client &&
+        client.getConnectionEpoch() === epoch && client.getStatus() === 'online';
+      void refreshSessionMeetingPeer(src).then(() => {
+        if (current()) {
+          handleLinkOpen(client, src, requestId, payload, acceptAttempt, true);
+        }
+      }).catch(() => {
+        // Authority fetch failure is transient, not a permanent user revocation.
+        if (current()) {
+          pendingMeetingOpens.delete(src);
+          client.closeLink(src, 'transport-timeout', 'inbound');
+        }
+      });
+      return;
+    }
+    const meeting = captureSessionMeetingPeer(src);
+    if (!meeting || !sanitizeControllerCapabilities(payload?.capabilities).includes(SESSION_MEETING_CAPABILITY)) {
+      client.closeLink(src, 'revoked', 'inbound');
+      return;
+    }
+    try {
+      client.sendLinkAccept(src, requestId, {
+        appVersion: app.getVersion(), allowlistHash: computeAllowlistHash(),
+        capabilities: [DEVICE_LINK_CAPABILITY_HISTORY_VIEW_V1, SESSION_MEETING_CAPABILITY],
+      });
+    } catch {
+      scheduleLinkAcceptRetry(client, src, requestId, payload, acceptAttempt + 1);
+      return;
+    }
+    markControllerLinkActive(client, src);
+    acceptedLinkControllers.add(src);
+    topicSubscriptionControllers.add(src);
+    subscriptions.updateControllerMetadata(src, meeting.author.displayName, sanitizeControllerCapabilities(payload?.capabilities));
+    flushRemoteInvokeResultOutbox(src);
+    return;
+  }
   // 第二道开关校验(server 已是第一道)
   if (!readDeviceLinkSettings().remoteControlEnabled) {
     // server 正常不会转发到这里;真到了说明状态不一致,静默不 accept
@@ -2659,6 +2714,8 @@ function settleRemoteInvokeWithOrphanDeadline(
 }
 
 function currentRemoteInvokeAdmissionFailure(src: string): InvokeResultPayload | null {
+  if (isMeetingPeer(src)) return captureSessionMeetingPeer(src) ? null
+    : { ok: false, error: { code: 'ACCESS_REVOKED', message: 'meeting access revoked' } };
   if (!readDeviceLinkSettings().remoteControlEnabled) {
     return { ok: false, error: { code: 'REMOTE_DISABLED', message: 'remote control disabled' } };
   }
@@ -2916,6 +2973,15 @@ function trySendInvokeResult(
   args?: unknown[],
   logFailure = true,
 ): { sent: true; result: InvokeResultPayload } | { sent: false; result: InvokeResultPayload } {
+  if (isMeetingPeer(src)) {
+    try {
+      const meeting = captureSessionMeetingPeer(src);
+      if (!meeting || !channel) throw new Error('Meeting unavailable');
+      assertSessionMeetingInvoke(meeting, { channel, args: args ?? [] }, undefined, 'result');
+    } catch {
+      result = { ok: false, error: { code: 'ACCESS_REVOKED', message: 'meeting task access denied' } };
+    }
+  }
   let candidate = result;
   try {
     client.sendInvokeResult(src, requestId, candidate);
@@ -3430,8 +3496,17 @@ function isRemoteSubscriptionTopic(value: unknown): value is Topic {
 }
 
 function handleSubscriptionFrame(src: string, payload: InvokePayload): InvokeResultPayload {
+  if (isMeetingPeer(src)) {
+    try {
+      const meeting = captureSessionMeetingPeer(src);
+      if (!meeting) throw new Error('Meeting unavailable');
+      assertSessionMeetingInvoke(meeting, payload);
+    } catch {
+      return { ok: false, error: { code: 'ACCESS_REVOKED', message: 'meeting task access denied' } };
+    }
+  }
   // 被控开关(server 已 gate invoke,这里二次兜底)
-  if (!readDeviceLinkSettings().remoteControlEnabled) {
+  if (!isMeetingPeer(src) && !readDeviceLinkSettings().remoteControlEnabled) {
     return { ok: false, error: { code: 'REMOTE_DISABLED', message: 'remote control disabled' } };
   }
   // 逐设备黑名单:已撤销 → 拒绝订阅(控制端据此 ACCESS_REVOKED 标记「已撤销」+ 移除该设备)。
@@ -3521,11 +3596,30 @@ export async function runInvoke(
   src: string,
   payload: InvokePayload | undefined,
 ): Promise<InvokeResultPayload> {
+  if (!isMeetingPeer(src)) return runAuthorizedInvoke(src, payload);
+  const meeting = captureSessionMeetingPeer(src);
+  try {
+    if (!meeting || !payload) throw new Error('Meeting unavailable');
+    assertSessionMeetingInvoke(meeting, payload);
+    const result = await runDeviceLinkInvokeContext(
+      { controllerDeviceId: src, channel: payload.channel, meeting, meetingSetting: { admitted: false } },
+      () => runAuthorizedInvoke(src, payload),
+    );
+    if (!meeting.isCurrent()) throw new Error('Meeting revoked');
+    return result;
+  } catch {
+    return { ok: false, error: { code: 'ACCESS_REVOKED', message: 'meeting task access denied' } };
+  }
+}
+
+async function runAuthorizedInvoke(
+  src: string, payload: InvokePayload | undefined,
+): Promise<InvokeResultPayload> {
   if (!payload || typeof payload.channel !== 'string') {
     return { ok: false, error: { code: 'INTERNAL', message: 'malformed invoke payload' } };
   }
   // 双层校验之一:被控开关
-  if (!readDeviceLinkSettings().remoteControlEnabled) {
+  if (!isMeetingPeer(src) && !readDeviceLinkSettings().remoteControlEnabled) {
     return { ok: false, error: { code: 'REMOTE_DISABLED', message: 'remote control disabled' } };
   }
   // 逐设备黑名单:已撤销访问权限的控制端直接拒绝(早于 allowlist)。
@@ -3722,6 +3816,8 @@ export async function runInvoke(
       {
         controllerDeviceId: src,
         channel: payload.channel,
+        meeting: getDeviceLinkInvokeContext()?.meeting,
+        meetingSetting: getDeviceLinkInvokeContext()?.meetingSetting,
         // 平台按 server 盖章的 src 查本机 presence 登记表,不采信控制端自报的任何
         // 帧内字段(allowlist 只挡 channel 不挡 args,见下方 dispatchLocalInvoke 前的说明)。
         controllerPlatform: getControllerPlatform(src),
@@ -3741,6 +3837,8 @@ export async function runInvoke(
     );
     if (hasRemoteBotSessionLookup()) await assertRemoteBotInvocationAllowed(args, payload.channel);
     if (!broadcastTap.isDataOwnerBroadcastScopeCurrent(invocationOwner)) throw new Error('[NOT_FOUND] Session does not exist');
+    if (getDeviceLinkInvokeContext()?.meeting?.isCurrent() === false &&
+        !getDeviceLinkInvokeContext()?.meetingSetting?.admitted) throw new Error('[PERMISSION_DENIED] Meeting task access denied');
     // 远程 set-* 回流:被控端 set-* runtime-only,补一次 DB 持久化 + 广播 patched,让控制端
     // 镜像收敛到被控端真相(取代控制端乐观覆盖)。本机会话不走这条(走 renderer update)。
     await persistRemoteSetting(payload.channel, payload.args ?? [], result);

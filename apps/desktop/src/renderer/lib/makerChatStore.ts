@@ -1,4 +1,5 @@
 import type { ImMessageSource } from '../../shared/imMessageSource';
+import { sessionMeetingAuthorName } from '@cindy/maker-shared';
 import { readBotAuthorizationCard } from '../../shared/botAuthorization';
 /**
  * makerChatStore — Module-level store for Maker chat (Claude / Codex), sharded by sessionId.
@@ -465,6 +466,7 @@ export interface ChatMessage {
    * 据此在气泡上方渲染"由自动化任务发送"标签。手动输入的消息无此字段。
    */
   automationOrigin?: MessageAutomationOrigin;
+  sharedAuthorName?: string;
   /** user 消息投递方式:普通新 turn 或运行中 steer。 */
   delivery?: 'turn' | 'steer';
   /** Hook 来源元数据(IM 平台 + 用户干净原文 + thread 上下文),UserMessage 据此渲染 Cindy 任务卡片。 */
@@ -17445,6 +17447,7 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
       // older Mobile clients into legacy Hook/system-card semantics.
       const hookSource = m.agentMeta?.imSource ?? m.agentMeta?.hookSource;
       return {
+        sharedAuthorName: sessionMeetingAuthorName(m.agentMeta),
         clientId: m.clientId,
         role: m.role,
         content: parsed.text,
