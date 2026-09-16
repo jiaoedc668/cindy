@@ -130,6 +130,8 @@
       "confirmDisconnectHint": "将结束远程桌面连接，电脑上的应用仍会继续运行。",
       "disconnectFailed": "未能断开连接，请重试。",
       "clipboardShortcutHint": "在画面内使用 {{modifier}}+C / {{modifier}}+V，即可在两台电脑之间复制粘贴文字。暂不支持图片和文件。",
+      "fitViewerDisplay": "按当前画面比例调整",
+      "fitViewerDisplayHint": "临时调整电脑桌面比例，保留当前桌面内容。退出连接后恢复原分辨率。",
       "resolutionHint": "分辨率修改会影响远端的实际显示器。"
     }
   },
@@ -703,6 +705,15 @@
       "wecomGroupClearFailed": "Webhook 移除失败"
     },
     "windowBehavior": {
+      "loginItem": {
+        "label": "登录电脑后自动启动 Cindy",
+        "hint": "登录系统后自动打开 Cindy，默认关闭",
+        "requiresApproval": "请在 macOS 系统设置的登录项中允许 Cindy，完成后此设置才会生效",
+        "loading": "正在读取系统设置…",
+        "loadFailed": "无法读取启动设置，请重新打开此设置页重试",
+        "saveFailed": "无法保存启动设置，请重试或检查系统启动项",
+        "notApplied": "系统未应用此设置，请检查系统启动项后重试"
+      },
       "title": "应用行为",
       "closeBehavior": {
         "label": "关闭主窗口时",
@@ -3778,6 +3789,12 @@
           "statusPendingSuffix_other": "({{count}} 个待处理)",
           "statusOffKept_one": "已关闭 · {{count}} 个 workspace 绑定已保留",
           "statusOffKept_other": "已关闭 · {{count}} 个 workspace 绑定已保留",
+          "removeCommunicationsConfirmDescription": "将移除此设备对该 workspace 的通讯授权，不影响其他设备或 Bot 接收设置。",
+          "localCommunications": "本机 Slack 通讯",
+          "communicationsActive": "Slack 通讯已开启",
+          "communicationsInactive": "Slack 通讯已关闭",
+          "botNotReceiving": "不接收 Bot 对话",
+          "receiveBot": "接收 Bot 对话",
           "displaced": "已在另一台设备绑定",
           "rebind": "重新绑定",
           "removeAria": "解绑此 workspace",
@@ -5675,6 +5692,16 @@
       "permissionModeDisabled": "远程 IM 使用 Cindy 桌面端确认策略，因此该权限模式不可用。"
     },
     "cindyMake": {
+      "create": {
+        "title": "创建个人版本",
+        "cancel": "取消",
+        "description": "说说你想让 Cindy 做哪些改变。接下来会打开制作任务，使用统一流程检查环境、准备源码，再继续制作。",
+        "requestLabel": "你想做哪些改变？",
+        "requestHint": "最多 {{max}} 字。提交后可在任务中继续查看进度，离开设置页不会停止准备。",
+        "placeholder": "例如：在任务列表增加一个只看未完成任务的筛选按钮。",
+        "continue": "开始制作",
+        "failed": "未能开始制作，需求已保留，请重试。"
+      },
       "title": "Cindy Make",
       "openToolsDir": "打开工具目录",
       "source": {
@@ -5685,10 +5712,6 @@
         "update": "更新源码",
         "preparingAction": "正在准备源码",
         "path": "路径",
-        "channel": "渠道",
-        "version": "版本",
-        "ref": "Ref",
-        "commit": "Commit",
         "status": {
           "missing": "尚未准备个人版源码",
           "pending": "正在准备源码",
@@ -5703,8 +5726,6 @@
           "confirm": "清理源码",
           "cancel": "取消"
         },
-        "branch": "个人版分支",
-        "baseCommit": "基线",
         "description": "Cindy 个人版的源码副本。制作个人版时会从个人版分支创建独立的开发目录，修改经测试后合并回来；这个目录本身不用来改代码。",
         "stop": "停止"
       },
@@ -6170,6 +6191,7 @@
     "loadFailed": "无法加载用量历史。请重新打开设置后重试。",
     "range": {
       "label": "时间范围",
+      "date": "日期",
       "ariaLabel": "筛选用量时间范围",
       "all": "所有时间",
       "30d": "最近 30 天",
@@ -8585,8 +8607,15 @@
       }
     },
     "runningStatus": {
+      "currentRate": "最近速度",
+      "waitingSample": "采样中",
+      "averageRate": "本轮平均",
+      "rateHistory": "生成速度历史",
+      "outputTotal": "累计输出",
+      "observedPeak": "峰值",
       "tokenRate": "{{rate}} tok/s",
-      "tokenRateDescription": "本轮主 Agent 的平均生成速度，含思考，排除工具执行和审批等待。随用量回报更新；旁边显示本轮总耗时。",
+      "tokenRateUnit": "tok/s",
+      "tokenRateDescription": "最近一段生成速度，不含工具执行与等待。",
       "tokenCount": "{{tokens}} tok"
     },
     "shareImage": {
@@ -8810,6 +8839,11 @@
       "closeHint": "或点击背景关闭"
     },
     "remoteFile": {
+      "previewFailed": "无法准备网页预览，请检查目录和连接后重试",
+      "previewNotFound": "找不到 HTML 文件，请确认文件仍然存在",
+      "previewFetching": "正在准备网页预览…",
+      "previewTooLarge": "正在准备的预览过多，请稍后重试",
+      "previewUnsupported": "远程设备暂不支持目录预览，请更新该设备上的 Cindy 后重试",
       "fetching": "正在从远端获取文件…",
       "fetchFailed": "从远端获取文件失败",
       "notFound": "远端文件不存在",
@@ -12544,20 +12578,22 @@
       "needRequest": "填写要修改的功能名称或具体报错，查询相关上游内容。",
       "placeholder": "例如：修复消息流闪烁",
       "search": "查询上游",
-      "searching": "正在查询上游 Issue 和 PR…",
-      "found": "找到可能相关的上游内容",
-      "notFound": "没有找到匹配的上游内容",
+      "searching": "正在查询相关上游 PR…",
+      "found": "找到可能相关的 PR",
+      "notFound": "未找到其他匹配的 PR",
       "failed": "上游查询失败",
       "cancelled": "上游查询已停止",
       "terms": "查询关键词：{{terms}}",
       "author": "作者：{{author}}",
       "updated": "更新于 {{date}}",
-      "notFoundHint": "没有找到匹配这些关键词的公开 Issue 或 PR，换一种描述可能会有其他结果。",
-      "resultHint": "请打开链接判断是否相关。这里只显示当前开放的 Issue 和 PR。",
+      "expand": "查看查询结果",
+      "collapse": "收起查询结果",
+      "notFoundHint": "本次关键词查询未发现其他候选，换一种描述可能会找到更多 PR。",
+      "resultHint": "包含未合并及已合并 PR，已确认包含在当前运行版本中的结果会被排除。请打开链接判断是否相关；已合并不等于已发布。",
       "wait": "等待上游",
       "personal": "继续制作个人版",
       "retry": "重新检查并查询",
-      "count": "找到 {{count}} 条可能相关的开放 Issue 或 PR",
+      "count": "{{count}} 个可能相关的 PR 待查看",
       "kind": {
         "issue": "Issue",
         "pr": "PR"
@@ -12581,6 +12617,22 @@
         "rateLimit": "GitHub 查询次数受限，请稍后重试。",
         "timeout": "上游查询超时，请重试。",
         "invalidResponse": "GitHub 返回的结果不完整或无法识别，请重试。"
+      },
+      "runtimeUnknown": "无法准确确认当前运行源码（例如有本地改动的 Dev 版），候选 PR 保留供判断。",
+      "excludedIncluded": "已排除当前运行版本包含的 {{count}} 个 PR。",
+      "limitedHint": "本次只核对了部分搜索结果，可细化需求以缩小范围。",
+      "runtimeVersion": "当前运行：{{channel}} {{version}} · {{commit}}",
+      "unknownCommit": "提交未知",
+      "draft": "草稿",
+      "channel": {
+        "dev": "Dev",
+        "beta": "Beta",
+        "release": "发布版"
+      },
+      "inclusion": {
+        "included": "当前运行版本已包含",
+        "notIncluded": "当前运行版本未包含",
+        "unknown": "是否包含尚未确认"
       }
     },
     "title": "Cindy Make",
@@ -12594,8 +12646,10 @@
         "cloning": "正在下载源码",
         "fetching": "正在刷新仓库",
         "checkingOut": "正在切换版本",
-        "preparingBranch": "正在准备个人版分支"
+        "preparingBranch": "正在准备个人版分支",
+        "installing": "正在安装依赖"
       },
+      "pending": "等待准备源码",
       "ready": "源码已准备好",
       "failed": "源码准备失败",
       "cancelled": "源码准备已停止",
@@ -12619,8 +12673,15 @@
         "checkingOut": "正在更新文件"
       },
       "missing": "尚未准备源码",
-      "personalBranch": "个人版分支 {{branch}}",
-      "baseCommit": "基于 {{ref}} {{commit}}"
+      "details": {
+        "branch": "个人版分支",
+        "baseRef": "基于 {{ref}}",
+        "baseCommit": "来源版本",
+        "mainCommit": "main 版本",
+        "currentBranch": "当前项目分支",
+        "detached": "未在分支上（固定提交）",
+        "unknown": "更新源码后查看"
+      }
     },
     "code": {
       "starting": "正在打开个人版任务",

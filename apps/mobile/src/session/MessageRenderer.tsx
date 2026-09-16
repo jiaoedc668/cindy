@@ -95,6 +95,7 @@ import { isShareableMessage } from '@/session/shareSelectionStore';
 import {
   ShareMessageCheckbox,
   useCancelShareSelectionRowTap,
+  MessageBodyText,
 } from '@/session/ShareMessageCheckbox';
 import { SentInlineAtomBody } from '@/session/SentInlineAtomBody';
 import { selectableTextVerticalOffset } from '@/session/selectableTextAlignment';
@@ -5586,7 +5587,7 @@ function renderInline(
     streaming?: boolean;
   } = {},
 ): ReactNode {
-  const SpanText = ctx.SpanText ?? Text;
+  const SpanText = ctx.SpanText ?? MessageBodyText;
   const openImage = ctx.onOpenImage ?? (ctx.onOpenPayload
     ? (url: string, alt?: string) => {
         const title = mobileMarkdownImageTitle(url, alt);

@@ -119,7 +119,7 @@ export function assertSessionMeetingInvoke(
   if (channel === 'device-link:media:fetch') {
     const request = record(args[0]);
     if (args.length !== 1 || !request || typeof request.url !== 'string' ||
-        Object.keys(request).some((key) => !['url', 'skipCache', 'thumbnail'].includes(key)) ||
+          Object.keys(request).some((key) => !['url', 'skipCache', 'thumbnail', 'prepareOnly'].includes(key)) ||
         !capture.authorize('attachment.read')) deny();
     // The media handler validates ledger/workdir ownership before reading bytes.
     return;

@@ -130,6 +130,8 @@
       "confirmDisconnectHint": "將結束遠端桌面連線，電腦上的應用程式仍會繼續執行。",
       "disconnectFailed": "無法中斷連線，請重試。",
       "clipboardShortcutHint": "在畫面內使用 {{modifier}}+C / {{modifier}}+V，即可在兩台電腦之間複製貼上文字。暫不支援圖片和檔案。",
+      "fitViewerDisplay": "依目前畫面比例調整",
+      "fitViewerDisplayHint": "暫時調整電腦桌面比例，保留目前桌面內容。離開連線後恢復原解析度。",
       "resolutionHint": "解析度修改會影響遠端的實際顯示器。"
     }
   },
@@ -703,6 +705,15 @@
       "wecomGroupClearFailed": "Webhook 移除失敗"
     },
     "windowBehavior": {
+      "loginItem": {
+        "label": "登入電腦後自動啟動 Cindy",
+        "hint": "登入系統後自動開啟 Cindy，預設關閉",
+        "requiresApproval": "請在 macOS 系統設定的登入項目中允許 Cindy，完成後此設定才會生效",
+        "loading": "正在讀取系統設定…",
+        "loadFailed": "無法讀取啟動設定，請重新開啟此設定頁重試",
+        "saveFailed": "無法儲存啟動設定，請重試或檢查系統啟動項目",
+        "notApplied": "系統未套用此設定，請檢查系統啟動項目後重試"
+      },
       "title": "應用行為",
       "closeBehavior": {
         "label": "關閉主視窗時",
@@ -3778,6 +3789,12 @@
           "statusPendingSuffix_other": "({{count}} 個待處理)",
           "statusOffKept_one": "已關閉 · {{count}} 個 workspace 繫結已保留",
           "statusOffKept_other": "已關閉 · {{count}} 個 workspace 繫結已保留",
+          "removeCommunicationsConfirmDescription": "將移除此裝置對該 workspace 的通訊授權，不影響其他裝置或 Bot 接收設定。",
+          "localCommunications": "本機 Slack 通訊",
+          "communicationsActive": "Slack 通訊已開啟",
+          "communicationsInactive": "Slack 通訊已關閉",
+          "botNotReceiving": "不接收 Bot 對話",
+          "receiveBot": "接收 Bot 對話",
           "displaced": "已在另一臺裝置繫結",
           "rebind": "重新繫結",
           "removeAria": "解綁此 workspace",
@@ -5675,6 +5692,16 @@
       "permissionModeDisabled": "遠端 IM 使用 Cindy 桌面端確認策略，因此該權限模式不可用。"
     },
     "cindyMake": {
+      "create": {
+        "title": "建立個人版本",
+        "cancel": "取消",
+        "description": "說說你想讓 Cindy 做哪些改變。接下來會開啟製作任務，使用統一流程檢查環境、準備原始碼，再繼續製作。",
+        "requestLabel": "你想做哪些改變？",
+        "requestHint": "最多 {{max}} 字。提交後可在任務中繼續查看進度，離開設定頁不會停止準備。",
+        "placeholder": "例如：在任務清單增加一個只看未完成任務的篩選按鈕。",
+        "continue": "開始製作",
+        "failed": "無法開始製作，需求已保留，請重試。"
+      },
       "title": "Cindy Make",
       "openToolsDir": "打開工具目錄",
       "source": {
@@ -5685,10 +5712,6 @@
         "update": "更新原始碼",
         "preparingAction": "正在準備原始碼",
         "path": "路徑",
-        "channel": "渠道",
-        "version": "版本",
-        "ref": "Ref",
-        "commit": "Commit",
         "status": {
           "missing": "尚未準備個人版原始碼",
           "pending": "正在準備原始碼",
@@ -5703,8 +5726,6 @@
           "confirm": "清理原始碼",
           "cancel": "取消"
         },
-        "branch": "個人版分支",
-        "baseCommit": "基線",
         "description": "Cindy 個人版的原始碼副本。製作個人版時會從個人版分支建立獨立的開發目錄，修改經測試後合併回來；這個目錄本身不用來改程式碼。",
         "stop": "停止"
       },
@@ -6170,6 +6191,7 @@
     "loadFailed": "無法載入用量歷史。請重新開啟設定後再試一次。",
     "range": {
       "label": "時間範圍",
+      "date": "日期",
       "ariaLabel": "篩選用量時間範圍",
       "all": "所有時間",
       "30d": "最近 30 天",
@@ -8584,8 +8606,15 @@
       }
     },
     "runningStatus": {
+      "currentRate": "最近速度",
+      "waitingSample": "取樣中",
+      "averageRate": "本輪平均",
+      "rateHistory": "生成速度歷史",
+      "outputTotal": "累計輸出",
+      "observedPeak": "峰值",
       "tokenRate": "{{rate}} tok/s",
-      "tokenRateDescription": "本輪主 Agent 的平均生成速度，含思考，排除工具執行與審批等待。隨用量回報更新；旁邊顯示本輪總耗時。",
+      "tokenRateUnit": "tok/s",
+      "tokenRateDescription": "最近一段生成速度，不含工具執行與等待。",
       "tokenCount": "{{tokens}} tok"
     },
     "shareImage": {
@@ -8809,6 +8838,11 @@
       "closeHint": "或點選背景關閉"
     },
     "remoteFile": {
+      "previewFailed": "無法準備網頁預覽，請檢查目錄和連線後重試",
+      "previewNotFound": "找不到 HTML 檔案，請確認檔案仍然存在",
+      "previewFetching": "正在準備網頁預覽…",
+      "previewTooLarge": "正在準備的預覽過多，請稍後重試",
+      "previewUnsupported": "遠端裝置暫不支援目錄預覽，請更新該裝置上的 Cindy 後重試",
       "fetching": "正在從遠端獲取檔案…",
       "fetchFailed": "從遠端獲取檔案失敗",
       "notFound": "遠端檔案不存在",
@@ -12544,20 +12578,22 @@
       "needRequest": "填寫要修改的功能名稱或具體錯誤，查詢相關上游內容。",
       "placeholder": "例如：修復訊息串流閃爍",
       "search": "查詢上游",
-      "searching": "正在查詢上游 Issue 和 PR…",
-      "found": "找到可能相關的上游內容",
-      "notFound": "沒有找到符合的上游內容",
+      "searching": "正在查詢相關上游 PR…",
+      "found": "找到可能相關的 PR",
+      "notFound": "未找到其他相符的 PR",
       "failed": "上游查詢失敗",
       "cancelled": "上游查詢已停止",
       "terms": "查詢關鍵字：{{terms}}",
       "author": "作者：{{author}}",
       "updated": "更新於 {{date}}",
-      "notFoundHint": "沒有找到符合這些關鍵字的公開 Issue 或 PR，換一種描述可能會有其他結果。",
-      "resultHint": "請開啟連結判斷是否相關。這裡只顯示目前開放的 Issue 與 PR。",
+      "expand": "查看查詢結果",
+      "collapse": "收起查詢結果",
+      "notFoundHint": "本次關鍵字查詢未發現其他候選，換一種描述可能會找到更多 PR。",
+      "resultHint": "包含未合併及已合併 PR，已確認包含在目前執行版本中的結果會被排除。請開啟連結判斷是否相關；已合併不等於已發布。",
       "wait": "等待上游",
       "personal": "繼續製作個人版",
       "retry": "重新檢查並查詢",
-      "count": "找到 {{count}} 筆可能相關的開放 Issue 或 PR",
+      "count": "{{count}} 個可能相關的 PR 待查看",
       "kind": {
         "issue": "Issue",
         "pr": "PR"
@@ -12581,6 +12617,22 @@
         "rateLimit": "GitHub 查詢次數受限，請稍後重試。",
         "timeout": "上游查詢逾時，請重試。",
         "invalidResponse": "GitHub 回傳的結果不完整或無法識別，請重試。"
+      },
+      "runtimeUnknown": "無法準確確認目前執行的原始碼（例如有本機修改的 Dev 版），候選 PR 保留供判斷。",
+      "excludedIncluded": "已排除目前執行版本包含的 {{count}} 個 PR。",
+      "limitedHint": "本次只核對了部分搜尋結果，可細化需求以縮小範圍。",
+      "runtimeVersion": "目前執行：{{channel}} {{version}} · {{commit}}",
+      "unknownCommit": "提交未知",
+      "draft": "草稿",
+      "channel": {
+        "dev": "Dev",
+        "beta": "Beta",
+        "release": "發布版"
+      },
+      "inclusion": {
+        "included": "目前執行版本已包含",
+        "notIncluded": "目前執行版本未包含",
+        "unknown": "是否包含尚未確認"
       }
     },
     "title": "Cindy Make",
@@ -12594,8 +12646,10 @@
         "cloning": "正在下載原始碼",
         "fetching": "正在更新儲存庫",
         "checkingOut": "正在切換版本",
-        "preparingBranch": "正在準備個人版分支"
+        "preparingBranch": "正在準備個人版分支",
+        "installing": "正在安裝相依套件"
       },
+      "pending": "等待準備原始碼",
       "ready": "原始碼已準備好",
       "failed": "原始碼準備失敗",
       "cancelled": "原始碼準備已停止",
@@ -12619,8 +12673,15 @@
         "checkingOut": "正在更新檔案"
       },
       "missing": "尚未準備原始碼",
-      "personalBranch": "個人版分支 {{branch}}",
-      "baseCommit": "基於 {{ref}} {{commit}}"
+      "details": {
+        "branch": "個人版分支",
+        "baseRef": "基於 {{ref}}",
+        "baseCommit": "來源版本",
+        "mainCommit": "main 版本",
+        "currentBranch": "目前專案分支",
+        "detached": "不在分支上（固定提交）",
+        "unknown": "更新原始碼後查看"
+      }
     },
     "code": {
       "starting": "正在開啟個人版任務",

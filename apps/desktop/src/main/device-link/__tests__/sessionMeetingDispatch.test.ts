@@ -44,6 +44,19 @@ describe('meeting dispatch scope', () => {
       expect(() => assertSessionMeetingInvoke(capture(), { channel, args: ['other'] })).toThrow();
     }
   });
+  it('accepts media preparation and OSS fallback without granting the file-peer channel', () => {
+    for (const prepareOnly of [true, false]) {
+      expect(() => assertSessionMeetingInvoke(capture(), {
+        channel: 'device-link:media:fetch', args: [{ url: 'xdt-image://task/a.png', prepareOnly }],
+      })).not.toThrow();
+    }
+    expect(() => assertSessionMeetingInvoke(capture(), {
+      channel: 'device-link:media:fetch', args: [{ url: 'xdt-image://task/a.png', prepareOnly: true, sessionId: 'other' }],
+    })).toThrow();
+    expect(() => assertSessionMeetingInvoke(capture(), {
+      channel: 'device-link:file-peer', args: [{ action: 'caps' }],
+    })).toThrow();
+  });
   it('checks nested references in both structured and persisted content before hydration', () => {
     for (const value of [
       { agentReferences: [{ kind: 'message', sessionId: 'other' }] },
