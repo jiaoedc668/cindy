@@ -1,3 +1,4 @@
+import { registerModelFavoritesSync } from './modelFavoritesSync.js';
 import { advanceRuntimeRecoveryNotice } from '../im/shared/runtimeRecoveryNotice.js';
 import { configureAppDefaultModelSelection } from './appDefaultModelControl.js';
 import type { BuiltinApiKeyBridgeDeps } from '../secrets/builtinApiKeyBridge.js';
@@ -4733,6 +4734,7 @@ let disposePiPackagesChangedBroadcast: (() => void) | null = null;
  * soon as the Renderer selects an owner, before the splash-gated Maker IPC bundle is available.
  */
 export function registerModelVisibilitySyncIpc(): void {
+  registerModelFavoritesSync(broadcastToAllWindows);
   configureAppDefaultModelSelection((appDefaultSelection) => {
     broadcastToAllWindows(MAKER_PUSH.DRAFT_PREF_APPLY, {
       agent: appDefaultSelection.route.harness === 'claude' ? 'claude-code' : appDefaultSelection.route.harness,
@@ -12421,7 +12423,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         const live = getMaker().getSession(sessionId);
         // busy ≠ failed：外层已守卫 turn-running；这里若仍撞上，中止而不是升级成 rebuild。
         if (live?.isTurnRunning()) return 'busy';
-        if (live) await getMaker().closeSession(sessionId);
+        if (live) await getMaker().closeSession(sessionId, 'runtime-refresh');
         const forked = await getMaker().forkSdkSession('codex', {
           sourceSdkSessionId: threadId,
           model: model ?? undefined,
@@ -12514,7 +12516,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     findLatestRebuildMeta: findLatestContextRebuildMeta,
     getLiveSession: (sessionId) => maker.getSession(sessionId),
     rehydrateColdPiRuntimeForWindowVerification,
-    closeSession: (sessionId) => maker.closeSession(sessionId),
+    closeSession: (sessionId) => maker.closeSession(sessionId, 'runtime-refresh'),
     drainPersistQueue,
     commitRebuild: async (sessionId, handoff, meta, signal) => {
       // Read projection metadata before the transaction: after a successful
