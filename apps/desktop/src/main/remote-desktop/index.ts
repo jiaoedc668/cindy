@@ -216,7 +216,7 @@ async function offer(
     if (settings?.audio && !supportsSystemAudio) throw new Error('DESKTOP_AUDIO_UNAVAILABLE');
     captureGrant = source ? { source, lease: lease.lease, audio: settings?.audio === true } : null;
     nativeDisplay = nativeAvailable ? lease.display.id : null;
-    nativeOverlay = cursorOverlay === true && process.platform === 'darwin';
+    nativeOverlay = cursorOverlay === true && nativeAvailable;
     nativeSettings = settings;
     setVideoLease(lease.lease);
     videoAttempt = attemptId;
@@ -346,7 +346,7 @@ export const remoteDesktop = new RemoteDesktopController({
     const viewerDisplay = enabled && (await viewerDisplaySupported());
     return {
       version: 1,
-      cursorOverlay: process.platform === 'darwin',
+      cursorOverlay: process.platform === 'darwin' || (process.platform === 'win32' && windowsAvailable),
       lockOnExit: process.platform === 'darwin',
       clipboardContent: process.platform === 'darwin' || process.platform === 'win32',
       clipboardText: process.platform === 'darwin' || process.platform === 'win32',
@@ -385,7 +385,7 @@ export const remoteDesktop = new RemoteDesktopController({
     if (process.platform === 'darwin' || windowsAvailable) {
       const frame = await nativeCapture.frame(
         displayId,
-        cursorOverlay === true && process.platform === 'darwin',
+        cursorOverlay === true,
         nativeSettings,
       );
       return encodeNativeRelayFrame(frame, (jpeg) => nativeImage.createFromBuffer(jpeg));

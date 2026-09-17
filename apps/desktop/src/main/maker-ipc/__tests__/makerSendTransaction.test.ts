@@ -99,6 +99,21 @@ function createDeps(overrides: Partial<MakerSendTransactionDeps> = {}) {
 }
 
 describe('maker SEND transaction', () => {
+  it('logs a slash-only DB fallback candidate without exposing the path or changing send behavior', async () => {
+    const workdirDiagnostics = { info: vi.fn(), warn: vi.fn() };
+    const { deps } = createDeps({
+      workdirDiagnostics,
+      readSessionWorkingDirFromDb: vi.fn(async () => 'C:/repo'),
+    });
+    const transaction = createMakerSendTransaction(deps);
+    await expect(transaction.sendToAgentAccepted('session-1', 'hello')).resolves.toMatchObject({ accepted: true });
+    expect(workdirDiagnostics.info).toHaveBeenCalledWith('workdir DB fallback candidate', expect.objectContaining({
+      source: 'live', sameNormalizedDirectory: true,
+    }));
+    expect(JSON.stringify(workdirDiagnostics.info.mock.calls)).not.toContain('repo');
+    expect(deps.closeSession).not.toHaveBeenCalled();
+  });
+
   it('stamps device-link provenance at the enqueue boundary and rejects forged local values', () => {
     const item = { clientId: 'input-1', text: 'hello' } as unknown as AgentInputQueuedMessage;
     expect(stampTrustedDeviceLinkQueuedOrigin(item, true)).toMatchObject({
@@ -399,6 +414,15 @@ describe('maker SEND transaction', () => {
 
     expect(vi.mocked(session.send).mock.calls[0]?.[1]?.[MAIN_OWNED_SEND_CONTEXT])
       .toBeUndefined();
+  });
+
+  it('passes the host text-only restriction to the runtime without leaking it into ordinary sends', async () => {
+    const { deps, session } = createDeps();
+    const transaction = createMakerSendTransaction(deps);
+    await transaction.sendToAgentAccepted('session-1', 'Say hello.', undefined, { toolsDisabled: true });
+    expect(vi.mocked(session.send).mock.calls[0]?.[1]).toMatchObject({ toolsDisabled: true });
+    await transaction.sendToAgentAccepted('session-1', 'Normal user request.');
+    expect(vi.mocked(session.send).mock.calls[1]?.[1]?.toolsDisabled).toBeUndefined();
   });
 
   it('does not preserve Desktop package authority across queued attachments', async () => {

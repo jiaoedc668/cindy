@@ -60,6 +60,9 @@ import { Spinner } from '@/components/ui/spinner';
 import { setRemoteReceiptDisplayReady } from '@/lib/sessionAttentionStore';
 import { shortSessionId } from '@/lib/sessionId';
 import { ChatInput } from '@/components/new-chat/ChatInput';
+import { CindyMakeComposerMask } from '@/components/cindy-make/CindyMakeComposerMask';
+import { getCindyMakeComposerPhase } from '@/lib/cindyMakeComposer';
+import { useCindyMakeState } from '@/lib/cindyMakeState';
 import { GoalIndicator } from '@/components/new-chat/GoalIndicator';
 import { PinnedPlanPanel } from '@/components/new-chat/PinnedPlanPanel';
 import { sessionsStore } from '@/lib/sessionsStore';
@@ -1764,6 +1767,23 @@ export function CCAgentSessionView({
     updateQueueItem,
     chatDisplaySnapshot,
   } = useCCAgentChat(sessionId, handleTitleUpdate, { chatRealtime });
+  const makeState = useCindyMakeState();
+  const cindyMakeComposerPhase = useMemo(
+    () =>
+      getCindyMakeComposerPhase({
+        session,
+        report: remoteDeviceId
+          ? undefined
+          : Object.values(makeState.tasks ?? {}).find(
+              (report) => report.task?.sessionId === sessionId,
+            ),
+        messages,
+        historyLoaded,
+        busy: isAgentBusy,
+        error,
+      }),
+    [session, sessionId, remoteDeviceId, makeState, messages, historyLoaded, isAgentBusy, error],
+  );
   useEffect(() => {
     if (!sessionId || !isOrcaLeadSessionView || !historyLoaded) return;
     const recoveredAssignment = getRecoverableDeferredUiAssignment({
@@ -3377,6 +3397,7 @@ export function CCAgentSessionView({
       },
     ) => {
       if (readOnly) return false;
+      if (cindyMakeComposerPhase) return false;
       const deliveryMode = opts?.deliveryMode ?? 'queue';
       const originalMessage = message;
       const navigationRequestVersion =
@@ -3659,6 +3680,7 @@ export function CCAgentSessionView({
       vendorAuthGate,
       remoteDeviceId,
       sessionHandoffPreparing,
+      cindyMakeComposerPhase,
     ],
   );
 
@@ -3828,9 +3850,10 @@ export function CCAgentSessionView({
   ]);
 
   const handleBeforeVoiceInputStart = useCallback(async () => {
+    if (cindyMakeComposerPhase) return false;
     const { proceed } = await vendorAuthGate.checkAndConfirm('codex', { purpose: 'voice-input' });
     return proceed;
-  }, [vendorAuthGate]);
+  }, [vendorAuthGate, cindyMakeComposerPhase]);
 
   // M32: Retry — ErrorBanner 的 retryText 现在只是兼容展示值。真正的
   // recovery target 由 main coordinator 持有，避免把已发出的文本重新走普通
@@ -4431,6 +4454,7 @@ export function CCAgentSessionView({
   const shareSelectionBlocked =
     Boolean(sessionBinding.attached) ||
     worktreePreparing ||
+    Boolean(cindyMakeComposerPhase) ||
     Boolean(
       pendingPlanReview ||
       pendingPermission ||
@@ -4583,6 +4607,7 @@ export function CCAgentSessionView({
           if (hasSplitGroupSessionType(e.dataTransfer.types)) return;
           e.preventDefault();
           e.stopPropagation();
+          if (cindyMakeComposerPhase) return;
           dragCounterRef.current += 1;
           if (dragCounterRef.current === 1) setIsDragOver(true);
         }}
@@ -4590,7 +4615,7 @@ export function CCAgentSessionView({
           if (hasSplitGroupSessionType(e.dataTransfer.types)) return;
           e.preventDefault();
           e.stopPropagation();
-          e.dataTransfer.dropEffect = 'copy';
+          e.dataTransfer.dropEffect = cindyMakeComposerPhase ? 'none' : 'copy';
         }}
         onDragLeave={(e) => {
           if (hasSplitGroupSessionType(e.dataTransfer.types)) return;
@@ -4605,6 +4630,7 @@ export function CCAgentSessionView({
           e.stopPropagation();
           dragCounterRef.current = 0;
           setIsDragOver(false);
+          if (cindyMakeComposerPhase) return;
           // .cindy / .cshare 已被窗口级 capture 接管(装入 / 导入链路),
           // 只清理拖拽 UI 状态,不当附件消费。
           if (isGlobalDropIntercepted(e.nativeEvent)) return;
@@ -5143,9 +5169,10 @@ export function CCAgentSessionView({
                  既处理不了确认又无法继续发送或排队消息。
                  优先级 (高 → 低):
                    1. attached (远程接管中)  → TakeoverMask  (90px)
-                   2. worktreePreparing      → WorktreeCreatingOverlay (90px, 视觉同款)
-                   3. 默认                    → ChatInput
-                 两个 mask 共用 TakeoverMask 同款外形 (90px h / 12px round / sidebar
+                   2. Cindy Make 准备 / 首次执行 → CindyMakeComposerMask (90px, 视觉同款)
+                   3. worktreePreparing      → WorktreeCreatingOverlay (90px, 视觉同款)
+                   4. 默认                    → ChatInput
+                 这些 mask 共用 TakeoverMask 同款外形 (90px h / 12px round / sidebar
                  border), 切到 ChatInput 时高度变大, 与 takeover 收回回到 ChatInput
                  的体验一致。 */}
               {!isMeetingPeer(remoteDeviceId ?? '') && (pendingPlanReview ||
@@ -5160,6 +5187,11 @@ export function CCAgentSessionView({
                   channel={sessionBinding.identity?.channel ?? 'feishu'}
                   userId={sessionBinding.identity?.userId ?? null}
                   displayName={sessionBinding.displayName}
+                />
+              ) : cindyMakeComposerPhase ? (
+                <CindyMakeComposerMask
+                  phase={cindyMakeComposerPhase}
+                  onStop={!readOnly && isAgentBusy ? handleStopSession : undefined}
                 />
               ) : worktreePreparing && smoothedBranchName ? (
                 <WorktreeCreatingOverlay branchName={smoothedBranchName} />

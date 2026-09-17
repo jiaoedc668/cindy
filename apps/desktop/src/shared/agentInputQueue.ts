@@ -10,6 +10,7 @@
 
 import { stripChatQuoteMarkerLines } from '@cindy/maker-shared/chat-quotes';
 import type { SessionMeetingAuthor } from '@cindy/maker-shared';
+import { UI_ACTION_TRIGGER_PREFIX } from '@cindy/maker-shared/synthetic-trigger';
 import { MENTION_TOKEN_SPLIT, parseMentionToken } from '@cindy/maker-shared/mention-ref';
 import {
   describeAgentInputReference,
@@ -223,6 +224,8 @@ export interface AgentInputQueuedMessage {
   meetingAuthor?: SessionMeetingAuthor;
   /** Host-captured authored text before plugin/reference decoration; omitted from wire projections. */
   autoReviewUserText?: string;
+  /** Host-owned text-only input; retained by queue persistence and retry. */
+  toolsDisabled?: boolean;
   clientId: string;
   text: string;
   /**
@@ -546,6 +549,11 @@ export function updateQueuedMessageText(
   newText: string,
   sessionRefs: AgentInputSessionRef[] = reconcileSessionRefsForText(newText, entry.sessionRefs),
 ): AgentInputQueuedMessage {
+  // A plugin rewrite must not turn a hidden host welcome into an editable user draft.
+  if (entry.toolsDisabled === true && entry.text.startsWith(UI_ACTION_TRIGGER_PREFIX)
+    && !newText.startsWith(UI_ACTION_TRIGGER_PREFIX)) {
+    newText = `${UI_ACTION_TRIGGER_PREFIX}${newText}`;
+  }
   const hasEncodedQuoteMarker = stripChatQuoteMarkerLines(newText) !== newText;
   const refsUnchanged = JSON.stringify(sessionRefs) === JSON.stringify(entry.sessionRefs ?? []);
   let nextPersisted = entry.persistedContent;
@@ -739,11 +747,15 @@ export function serializeSessionReferencePayload(
 
 /** Immutable semantic projection shared by Ghost, titles, turn and steer. */
 export function getAgentFacingText(queued: AgentInputQueuedMessage): string {
-  return projectAgentFacingText({
+  const text = projectAgentFacingText({
     text: queued.text,
     quotesEncoded: queued.chatMessage.quotesEncoded === true,
     agentReferences: queued.agentReferences,
   });
+  // Host text-only welcomes stay synthetic in queue/history projections, not in model input.
+  return queued.toolsDisabled === true && text.startsWith(UI_ACTION_TRIGGER_PREFIX)
+    ? text.slice(UI_ACTION_TRIGGER_PREFIX.length)
+    : text;
 }
 
 /**
