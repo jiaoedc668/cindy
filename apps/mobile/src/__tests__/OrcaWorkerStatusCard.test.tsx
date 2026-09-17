@@ -76,7 +76,7 @@ afterEach(() => {
 let leadSeq = 0;
 let lead = 'lead-0';
 
-async function render(workers: unknown[], onOpenWorker?: (id: string) => void) {
+async function render(workers: unknown[], onOpenWorker?: (id: string) => boolean) {
   h.listOrcaWorkersByLead.mockResolvedValue(workers);
   await act(async () => {
     root.render(
@@ -155,7 +155,7 @@ it('idle 不提示,跳变进 done 才提示', async () => {
 });
 
 it('打开 Worker 即视为已查看,提示随之清除', async () => {
-  const onOpenWorker = vi.fn();
+  const onOpenWorker = vi.fn(() => true);
   await render([{ id: 'a', label: 'w-done', status: 'done', sessionId: 's-a' }], onOpenWorker);
   expect(attentionDot()).not.toBeNull();
 
@@ -183,7 +183,7 @@ async function viewWorker() {
 
 it('done → running → done 属于两次跳变,第二轮完成必须重新提示', async () => {
   vi.useFakeTimers();
-  await render([{ id: 'a', label: 'w', status: 'done', sessionId: 's-a' }], vi.fn());
+  await render([{ id: 'a', label: 'w', status: 'done', sessionId: 's-a' }], vi.fn(() => true));
   await viewWorker();
   expect(attentionDot()).toBeNull();
 
@@ -209,7 +209,7 @@ it('done → running → done 属于两次跳变,第二轮完成必须重新提�
 it('切走再切回不得让同一轮 done 重新变未读(orca-team-architecture.md:324)', async () => {
   vi.useFakeTimers();
   const workers = [{ id: 'a', label: 'w', status: 'done', sessionId: 's-a' }];
-  await render(workers, vi.fn());
+  await render(workers, vi.fn(() => true));
   await viewWorker();
   expect(attentionDot()).toBeNull();
 
@@ -219,6 +219,43 @@ it('切走再切回不得让同一轮 done 重新变未读(orca-team-architectur
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  await render(workers, vi.fn());
+  await render(workers, vi.fn(() => true));
   expect(attentionDot()).toBeNull();
+});
+
+it('导航被丢弃时不得把该 Worker 记为已查看', async () => {
+  // guardedPush 在失焦 / 前进锁命中时静默丢弃,回调返回 false。
+  const rejected = vi.fn(() => false);
+  await render([{ id: 'a', label: 'w-done', status: 'done', sessionId: 's-a' }], rejected);
+  expect(attentionDot()).not.toBeNull();
+
+  await act(async () => toggle().click());
+  await act(async () => {
+    (container.querySelector(
+      '[data-testid="session.orcaWorkers.worker.s-a"]',
+    ) as HTMLButtonElement).click();
+  });
+  expect(rejected).toHaveBeenCalledWith('s-a');
+
+  // 没真正打开 → 收起后仍应提示。
+  await act(async () => toggle().click());
+  expect(attentionDot()).not.toBeNull();
+});
+
+it('换 Lead 后不得闪出上一个 Lead 的列表', async () => {
+  await render([{ id: 'a', label: 'w-from-A', status: 'running', sessionId: 's-a' }]);
+  await act(async () => toggle().click()); // 默认折叠,展开才渲染行
+  expect(container.textContent).toContain('w-from-A');
+
+  // 就地换 Lead(组件不卸载):B 的首帧必须已经看不到 A 的数据。
+  h.listOrcaWorkersByLead.mockReturnValue(new Promise(() => {}));
+  await act(async () => {
+    root.render(
+      createElement(OrcaWorkerStatusCard as any, {
+        leadSessionId: `${lead}-B`,
+        maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
+      }),
+    );
+  });
+  expect(container.textContent ?? '').not.toContain('w-from-A');
 });

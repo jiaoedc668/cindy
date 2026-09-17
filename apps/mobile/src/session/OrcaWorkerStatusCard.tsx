@@ -82,11 +82,17 @@ function workersFrom(value: unknown): Worker[] {
 export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
   leadSessionId: string;
   maker: MobileMakerTransport;
-  /** 打开该 Worker 的会话;只读口径由 collaboration.ts 按 orcaRole 判定。 */
-  onOpenWorker?: (workerSessionId: string) => void;
+  /**
+   * 打开该 Worker 的会话;只读口径由 collaboration.ts 按 orcaRole 判定。
+   * 返回 false 表示导航被丢弃(失焦 / 前进锁),此时不得把该 Worker 记为已查看。
+   */
+  onOpenWorker?: (workerSessionId: string) => boolean;
 }) {
   const { colors } = useTheme();
-  const [workers, setWorkers] = useState<Worker[] | null>(null);
+  // 快照与它所属的 Lead 绑定,渲染期同步比对。抽屉就地换 Lead 时组件不卸载,若只靠
+  // effect 事后清空,B 的首帧会先闪一遍 A 的 Worker 列表。
+  const [snapshot, setSnapshot] = useState<{ lead: string; workers: Worker[] } | null>(null);
+  const workers = snapshot?.lead === leadSessionId ? snapshot.workers : null;
   // 对齐桌面右侧栏「协同」tab:默认不展开,靠 attention 点把用户拉回来。
   // 桌面关闭 tab ≡ 结束协同(disableOrca);手机版第一版只读,这里只是视图折叠。
   const [expanded, setExpanded] = useState(false);
@@ -105,11 +111,10 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
   }, []);
   // 未读只存在于 module 级 store(见上),这里只用一个计数器触发重渲染。
   const [, bumpAttention] = useReducer((value: number) => value + 1, 0);
-  // 换 Lead 等于换一份列表:清空快照与展开态。未读**不在**此处重置 —— 契约要求
-  // 切走 / 切回不得让同一轮 done 重新变未读。失焦/回前台同样不走这里,避免把已
-  // 拿到的列表一并清掉。
+  // 换 Lead 时收起列表。快照不在此处清 —— 它由上面的 lead 比对同步失效,不依赖
+  // effect 事后补刀。未读同样**不**重置:契约要求切走 / 切回不得让同一轮 done
+  // 重新变未读。
   useEffect(() => {
-    setWorkers(null);
     setExpanded(false);
   }, [leadSessionId]);
   const polling = focused && appActive;
@@ -122,7 +127,7 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
         const next = workersFrom(await maker.listOrcaWorkersByLead(leadSessionId));
         if (active) {
           applyWorkerAttentionEdges(leadSessionId, next);
-          setWorkers(next);
+          setSnapshot({ lead: leadSessionId, workers: next });
         }
       } catch {
         // 刷新失败保留上一份快照:弱网下的瞬时超时不应让整张卡消失。
@@ -180,9 +185,10 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
             accessibilityRole="button"
             accessibilityLabel={`${name} · ${statusLabel(worker.status)}`}
             onPress={() => {
-              // 打开即「正在查看」→ 清除该 worker 的未读(契约:查看时清除)。
+              // 先看导航是否真的受理:guardedPush 在失焦 / 前进锁命中时静默丢弃。
+              // 只有真打开了才算「正在查看」,否则该 Worker 会被误标已读。
+              if (!onOpenWorker(workerSessionId)) return;
               if (unreadWorkers.delete(attentionKey(leadSessionId, key))) bumpAttention();
-              onOpenWorker(workerSessionId);
             }}
             style={({ pressed }) => [styles.row, styles.rowPressable, pressed && { opacity: 0.6 }]}
             testID={`session.orcaWorkers.worker.${workerSessionId}`}
