@@ -263,15 +263,10 @@ pub fn remove() -> Result<()> {
     let application = Approval::read().ok().map(|approval| approval.application);
     let snapshot = read_restore_record(&installation.directory)?;
     if let Some(snapshot) = &snapshot {
-        for (path, descriptor) in &snapshot.paths {
-            let allowed = match &application {
-                Some(root) => security::path_is_within(path, root),
-                None => installation::is_local_application_path(path),
-            };
-            if allowed && path.exists() {
-                security::restore_descriptor(path, descriptor)?;
-            }
-        }
+        snapshot.restore_allowed(|path| match &application {
+            Some(root) => security::path_is_within(path, root),
+            None => installation::is_local_application_path(path),
+        })?;
     }
     for name in [
         installation::APPROVAL,

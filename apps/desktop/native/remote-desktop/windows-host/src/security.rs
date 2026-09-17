@@ -592,11 +592,13 @@ pub fn secure_code(path: &Path) -> Result<()> {
     secure_code_with_descriptor(path, CODE_DACL)
 }
 
-fn secure_code_with_descriptor(path: &Path, descriptor: &str) -> Result<()> {
+fn open_for_acl(path: &Path) -> Result<Handle> {
     let handle = Handle::new(unsafe {
         CreateFileW(
             wide(&path.to_string_lossy()).as_ptr(),
-            READ_CONTROL | WRITE_DAC | WRITE_OWNER | FILE_READ_ATTRIBUTES,
+            READ_CONTROL | WRITE_DAC | WRITE_OWNER | FILE_READ_ATTRIBUTES | FILE_READ_DATA,
+            // Share read/write so a running image can stay mapped; never share
+            // DELETE, so the object cannot be replaced while this handle is held.
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             ptr::null(),
             OPEN_EXISTING,
@@ -611,6 +613,10 @@ fn secure_code_with_descriptor(path: &Path, descriptor: &str) -> Result<()> {
     {
         return denied();
     }
+    Ok(handle)
+}
+
+fn apply_descriptor(handle: HANDLE, descriptor: &str) -> Result<()> {
     let mut sd = ptr::null_mut();
     if unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -628,7 +634,7 @@ fn secure_code_with_descriptor(path: &Path, descriptor: &str) -> Result<()> {
     // must keep their original permissions, even if located below the app root.
     let result = unsafe {
         SetKernelObjectSecurity(
-            handle.0,
+            handle,
             OWNER_SECURITY_INFORMATION
                 | DACL_SECURITY_INFORMATION
                 | PROTECTED_DACL_SECURITY_INFORMATION,
@@ -643,6 +649,23 @@ fn secure_code_with_descriptor(path: &Path, descriptor: &str) -> Result<()> {
         return Err(std::io::Error::from_raw_os_error(code as i32));
     }
     Ok(())
+}
+
+fn secure_code_with_descriptor(path: &Path, descriptor: &str) -> Result<()> {
+    let handle = open_for_acl(path)?;
+    apply_descriptor(handle.0, descriptor)
+}
+
+fn restore_depth(a: &Path, b: &Path) -> std::cmp::Ordering {
+    b.components()
+        .count()
+        .cmp(&a.components().count())
+        .then_with(|| a.as_os_str().cmp(b.as_os_str()))
+}
+
+#[cfg(test)]
+fn deepest_first(paths: &mut [(PathBuf, String)]) {
+    paths.sort_by(|(a, _), (b, _)| restore_depth(a, b));
 }
 
 pub fn create_protected_directory(path: &Path) -> Result<()> {
@@ -830,10 +853,36 @@ impl AclSnapshot {
     }
 
     pub fn restore(&self) -> Result<()> {
-        for (path, descriptor) in &self.paths {
+        self.restore_allowed(|_| true)
+    }
+
+    pub fn restore_allowed(&self, allowed: impl Fn(&Path) -> bool) -> Result<()> {
+        // Pin shallowest-first without DELETE sharing while the tree is still
+        // the captured one. CreateFile follows intermediate junctions; holding
+        // the parent first stops a later swap from retargeting children.
+        // Apply ACLs through those handles, deepest-first, so FILE_DELETE_CHILD
+        // is not given back on a directory before its descendants are restored.
+        let mut ordered: Vec<_> = self
+            .paths
+            .iter()
+            .filter(|(path, _)| allowed(path))
+            .cloned()
+            .collect();
+        ordered.sort_by(|(a, _), (b, _)| {
+            a.components()
+                .count()
+                .cmp(&b.components().count())
+                .then_with(|| a.as_os_str().cmp(b.as_os_str()))
+        });
+        let mut pinned = Vec::new();
+        for (path, descriptor) in ordered {
             if path.exists() {
-                restore_descriptor(path, descriptor)?;
+                pinned.push((path, open_for_acl(&path)?, descriptor));
             }
+        }
+        pinned.sort_by(|(a, _, _), (b, _, _)| restore_depth(a, b));
+        for (_, handle, descriptor) in &pinned {
+            apply_descriptor(handle.0, descriptor)?;
         }
         Ok(())
     }
@@ -913,7 +962,10 @@ fn signer_thumbprint(path: &Path) -> Result<Vec<u8>> {
     let path = wide(&path.to_string_lossy());
     let mut store = ptr::null_mut();
     let mut message = ptr::null_mut();
-    let mut context = ptr::null_mut();
+    let mut encoding = 0;
+    // Embedded Authenticode fills the PKCS#7 store and message. ppvContext
+    // stays null for CERT_QUERY_CONTENT_PKCS7_SIGNED_EMBED; the signer is in
+    // the message, not that pointer.
     if unsafe {
         CryptQueryObject(
             CERT_QUERY_OBJECT_FILE,
@@ -921,15 +973,16 @@ fn signer_thumbprint(path: &Path) -> Result<Vec<u8>> {
             CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
             CERT_QUERY_FORMAT_FLAG_BINARY,
             0,
-            ptr::null_mut(),
+            &mut encoding,
             ptr::null_mut(),
             ptr::null_mut(),
             &mut store,
             &mut message,
-            &mut context,
+            ptr::null_mut(),
         )
     } == 0
-        || context.is_null()
+        || store.is_null()
+        || message.is_null()
     {
         if !message.is_null() {
             unsafe {
@@ -943,38 +996,90 @@ fn signer_thumbprint(path: &Path) -> Result<Vec<u8>> {
         }
         return Err(error());
     }
+    struct Query {
+        store: HCERTSTORE,
+        message: *mut core::ffi::c_void,
+    }
+    impl Drop for Query {
+        fn drop(&mut self) {
+            unsafe {
+                CryptMsgClose(self.message);
+                CertCloseStore(self.store, 0);
+            }
+        }
+    }
+    let query = Query { store, message };
     let mut size = 0;
-    let mut thumbprint = Vec::new();
-    let ok = unsafe {
-        CertGetCertificateContextProperty(
-            context.cast(),
-            CERT_HASH_PROP_ID,
+    if unsafe {
+        CryptMsgGetParam(
+            query.message,
+            CMSG_SIGNER_CERT_INFO_PARAM,
+            0,
             ptr::null_mut(),
             &mut size,
+        )
+    } == 0
+        || size == 0
+    {
+        return Err(error());
+    }
+    let mut info = vec![0u8; size as usize];
+    if unsafe {
+        CryptMsgGetParam(
+            query.message,
+            CMSG_SIGNER_CERT_INFO_PARAM,
+            0,
+            info.as_mut_ptr().cast(),
+            &mut size,
+        )
+    } == 0
+    {
+        return Err(error());
+    }
+    let encoding = if encoding == 0 {
+        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING
+    } else {
+        encoding
+    };
+    let context = unsafe {
+        CertFindCertificateInStore(
+            query.store,
+            encoding,
+            0,
+            CERT_FIND_SUBJECT_CERT,
+            info.as_ptr().cast(),
+            ptr::null(),
+        )
+    };
+    if context.is_null() {
+        return denied();
+    }
+    let mut thumbprint = Vec::new();
+    let mut thumb_size = 0;
+    let ok = unsafe {
+        CertGetCertificateContextProperty(
+            context,
+            CERT_HASH_PROP_ID,
+            ptr::null_mut(),
+            &mut thumb_size,
         ) != 0
             && {
-                thumbprint.resize(size as usize, 0);
+                thumbprint.resize(thumb_size as usize, 0);
                 CertGetCertificateContextProperty(
-                    context.cast(),
+                    context,
                     CERT_HASH_PROP_ID,
                     thumbprint.as_mut_ptr().cast(),
-                    &mut size,
+                    &mut thumb_size,
                 ) != 0
             }
     };
     unsafe {
-        CertFreeCertificateContext(context.cast());
-        if !message.is_null() {
-            CryptMsgClose(message);
-        }
-        if !store.is_null() {
-            CertCloseStore(store, 0);
-        }
+        CertFreeCertificateContext(context);
     }
     if !ok || thumbprint.is_empty() {
         return denied();
     }
-    thumbprint.truncate(size as usize);
+    thumbprint.truncate(thumb_size as usize);
     Ok(thumbprint)
 }
 
@@ -1363,6 +1468,38 @@ mod tests {
             br#"{"version":1,"paths":[{"path":"\\\\server\\share\\Cindy.exe","descriptor":"O:BAD:P"}]}"#
         )
         .is_err());
+    }
+    #[test]
+    fn restore_pins_the_tree_and_applies_nested_objects_first() {
+        let fixture = Fixture::new();
+        let nested = fixture.0.join("Cindy");
+        let child = nested.join("resources");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("app.asar"), b"fixture").unwrap();
+        let before_root = descriptor(&nested);
+        let before_child = descriptor(&child);
+        let tree = AclSnapshot::capture(&[nested.clone(), child.clone()]).unwrap();
+        let mut order = tree.paths.clone();
+        deepest_first(&mut order);
+        assert!(
+            order[0].0.components().count() >= order.last().unwrap().0.components().count(),
+            "restore must apply nested objects before relaxing the root"
+        );
+        let sid = token_user_sid(
+            token(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() })
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        secure_code_with_descriptor(&nested, &format!("O:{sid}D:P(A;;FA;;;{sid})")).unwrap();
+        secure_code_with_descriptor(&child, &format!("O:{sid}D:P(A;;FR;;;{sid})")).unwrap();
+        tree.restore().unwrap();
+        assert_eq!(descriptor(&nested), before_root);
+        assert_eq!(descriptor(&child), before_child);
+        std::fs::write(child.join("app.asar"), b"writable again").unwrap();
+        assert!(tree
+            .restore_allowed(|path| path.ends_with("missing"))
+            .is_ok());
     }
     #[test]
     fn reinstall_keeps_the_first_captured_restore_record() {

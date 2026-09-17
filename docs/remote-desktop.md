@@ -509,6 +509,11 @@ Electron already seals `app.asar`; unpacked JS/`.node` has no Windows signed
 catalog, and these checks do not claim to sandbox same-user injection into a
 live Main. A later failure rolls those ACLs back, and uninstall restores
 the captured descriptors so a per-user uninstaller can delete the application again.
+Restore pins every captured object without DELETE sharing before changing ACLs,
+then applies nested objects first so a parent cannot be swapped for a junction
+between path checks and the descriptor write. Packaged Authenticode matching
+reads the signer from the PKCS#7 message; CryptQueryObject leaves ppvContext
+null for embedded signatures.
 Reinstall keeps the first-install restore record: already-protected paths are not
 recaptured as an empty snapshot.
 The opt-in text discloses both service installation and program-file protection.
