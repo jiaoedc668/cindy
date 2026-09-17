@@ -259,3 +259,50 @@ it('换 Lead 后不得闪出上一个 Lead 的列表', async () => {
   });
   expect(container.textContent ?? '').not.toContain('w-from-A');
 });
+
+it('CHANNEL_NOT_ALLOWED 是永久兼容结果:只探一次即停轮询', async () => {
+  vi.useFakeTimers();
+  h.listOrcaWorkersByLead.mockRejectedValue(
+    Object.assign(new Error('remote invoke failed'), { code: 'CHANNEL_NOT_ALLOWED' }),
+  );
+  await act(async () => {
+    root.render(
+      createElement(OrcaWorkerStatusCard as any, {
+        leadSessionId: lead,
+        maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
+      }),
+    );
+  });
+  expect(h.listOrcaWorkersByLead).toHaveBeenCalledTimes(1);
+  expect(container.innerHTML).toBe('');
+
+  // 再过几轮也不得重发:面板保持不显示。
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(20000);
+  });
+  expect(h.listOrcaWorkersByLead).toHaveBeenCalledTimes(1);
+});
+
+it('瞬时失败仍继续轮询,并在恢复后显示', async () => {
+  vi.useFakeTimers();
+  h.listOrcaWorkersByLead.mockRejectedValue(new Error('tunnel dropped'));
+  await act(async () => {
+    root.render(
+      createElement(OrcaWorkerStatusCard as any, {
+        leadSessionId: lead,
+        maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
+      }),
+    );
+  });
+  expect(h.listOrcaWorkersByLead).toHaveBeenCalledTimes(1);
+
+  h.listOrcaWorkersByLead.mockResolvedValue([
+    { id: 'a', label: 'w-back', status: 'running', sessionId: 's-a' },
+  ]);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000);
+  });
+  expect(h.listOrcaWorkersByLead.mock.calls.length).toBeGreaterThan(1);
+  await act(async () => toggle().click());
+  expect(container.textContent).toContain('w-back');
+});

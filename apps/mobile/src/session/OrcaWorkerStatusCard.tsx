@@ -6,6 +6,7 @@ import { Text } from '@/components/AppText';
 import { useTheme, type ThemeColors } from '@/theme';
 import { i18n } from '@/i18n';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
+import { hasDeviceLinkErrorCode } from '@/device-link/rehydrate';
 import { fontWeight, iconSize, iconStroke, lineHeight, radius, typeScale } from '@/theme/tokens';
 
 type Worker = { id?: string; label?: string; role?: string; status?: string; sessionId?: string };
@@ -71,6 +72,16 @@ function applyWorkerAttentionEdges(leadSessionId: string, workers: Worker[]): bo
   return changed;
 }
 
+/**
+ * 老被控端没有这条 channel,会稳定返回 CHANNEL_NOT_ALLOWED。这是**永久性**的兼容
+ * 结果而非瞬时失败:重试多少次都一样,再轮询下去只是白耗 device-link 与电量。
+ * 命中即停轮询,面板保持不显示 —— 这正是 deviceLinkContract 里写的降级语义。
+ */
+function isUnsupportedChannelError(error: unknown): boolean {
+  return hasDeviceLinkErrorCode(error, 'CHANNEL_NOT_ALLOWED')
+    || hasDeviceLinkErrorCode(error, 'DEVICE_LINK_CHANNEL_NOT_ALLOWED');
+}
+
 function workersFrom(value: unknown): Worker[] {
   if (Array.isArray(value)) return value.filter((v): v is Worker => !!v && typeof v === 'object');
   if (value && typeof value === 'object' && Array.isArray((value as { workers?: unknown }).workers)) {
@@ -117,22 +128,34 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
   useEffect(() => {
     setExpanded(false);
   }, [leadSessionId]);
-  const polling = focused && appActive;
+  // 被控端不支持该 channel 的判定:只随 transport / Lead 变化复位,失焦再聚焦不重探。
+  const [unsupported, setUnsupported] = useState(false);
+  useEffect(() => {
+    setUnsupported(false);
+  }, [leadSessionId, maker]);
+  const polling = focused && appActive && !unsupported;
   useEffect(() => {
     if (!polling) return;
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
+      // stop 不能用 return 代替:finally 照样会执行,只有标志能拦住下一轮排程。
+      let stop = false;
       try {
         const next = workersFrom(await maker.listOrcaWorkersByLead(leadSessionId));
         if (active) {
           applyWorkerAttentionEdges(leadSessionId, next);
           setSnapshot({ lead: leadSessionId, workers: next });
         }
-      } catch {
-        // 刷新失败保留上一份快照:弱网下的瞬时超时不应让整张卡消失。
+      } catch (error) {
+        if (isUnsupportedChannelError(error)) {
+          // 永久性兼容结果,重试无意义:停轮询,面板保持不显示。
+          stop = true;
+          if (active) setUnsupported(true);
+        }
+        // 其余为瞬时失败:保留上一份快照,下一轮再刷。
       } finally {
-        if (active) timer = setTimeout(() => void load(), 5000);
+        if (active && !stop) timer = setTimeout(() => void load(), 5000);
       }
     };
     void load();
