@@ -46,9 +46,7 @@ fn service(manager: &ServiceHandle, access: u32) -> Result<ServiceHandle> {
         Ok(ServiceHandle(value))
     }
 }
-pub fn pid() -> Result<u32> {
-    let manager = manager(SC_MANAGER_CONNECT)?;
-    let service = service(&manager, SERVICE_QUERY_STATUS)?;
+fn query_status(service: &ServiceHandle) -> Result<SERVICE_STATUS_PROCESS> {
     let mut status: SERVICE_STATUS_PROCESS = unsafe { mem::zeroed() };
     let mut size = 0;
     if unsafe {
@@ -60,12 +58,24 @@ pub fn pid() -> Result<u32> {
             &mut size,
         )
     } == 0
-        || status.dwCurrentState != SERVICE_RUNNING
-        || status.dwProcessId == 0
     {
+        return Err(error());
+    }
+    Ok(status)
+}
+
+fn process_id(status: &SERVICE_STATUS_PROCESS) -> Option<u32> {
+    (status.dwProcessId != 0).then_some(status.dwProcessId)
+}
+
+pub fn pid() -> Result<u32> {
+    let manager = manager(SC_MANAGER_CONNECT)?;
+    let service = service(&manager, SERVICE_QUERY_STATUS)?;
+    let status = query_status(&service)?;
+    if status.dwCurrentState != SERVICE_RUNNING {
         return denied();
     }
-    Ok(status.dwProcessId)
+    process_id(&status).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
 }
 pub fn install() -> Result<()> {
     crate::security::require_elevated()?;
@@ -125,7 +135,10 @@ pub fn uninstall() -> Result<()> {
         Err(e) if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32) => return Ok(()),
         Err(e) => return Err(e),
     };
-    let running_process = pid().ok().and_then(|id| process(id).ok());
+    let running_process = query_status(&service)
+        .ok()
+        .and_then(|status| process_id(&status))
+        .and_then(|id| process(id).ok());
     let mut status: SERVICE_STATUS = unsafe { mem::zeroed() };
     if unsafe { ControlService(service.0, SERVICE_CONTROL_STOP, &mut status) } == 0
         && unsafe { GetLastError() } != ERROR_SERVICE_NOT_ACTIVE

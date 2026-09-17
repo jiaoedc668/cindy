@@ -44,8 +44,11 @@ cargo test --locked --manifest-path apps/desktop/native/remote-desktop/windows-h
 The file-lock regression uses real Windows handles: metadata-only opens do not
 enforce sharing restrictions. Code pins request read-data/list-directory access
 and reject outstanding writers, so changing an ACL cannot leave an old writer
-able to modify approved code. The directory-permission test also verifies that
-the exact-object ACL setter does not propagate into unrelated child data.
+able to modify approved code. Setup snapshots and restores those ACLs when
+installation fails or the service is removed. Packaged payload copies verify
+Authenticode and copy through an exclusive handle. The directory-permission test
+also verifies that the exact-object ACL setter does not propagate into unrelated
+child data.
 
 ## macOS input helper trust boundary
 

@@ -15,6 +15,7 @@ use windows_sys::{
 pub const HOST: &str = "cindy-windows-desktop-host.exe";
 pub const INPUT: &str = "cindy-windows-desktop-input.exe";
 pub const APPROVAL: &str = "authorization.json";
+pub const ACL_RESTORE: &str = "acl-restore.json";
 
 pub fn development_identity() -> Option<(PathBuf, PathBuf)> {
     #[cfg(feature = "development")]

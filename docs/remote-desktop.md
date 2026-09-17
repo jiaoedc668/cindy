@@ -502,6 +502,9 @@ directories, executable/DLL/V8 snapshot files, ASAR and unpacked native dependen
 It does not move the app or change parent-directory, userData, or workspace permissions.
 Protected code subsequently requires administrator rights to replace, including
 updates; the existing installer already handles protected-directory authorization.
+If a live writer or other sharing conflict still holds a code file, setup refuses
+before changing ACLs. A later failure rolls those ACLs back, and uninstall restores
+the captured descriptors so a per-user uninstaller can delete the application again.
 The opt-in text discloses both service installation and program-file protection.
 Cancelling UAC runs neither step and does not disable ordinary remote desktop.
 
@@ -544,7 +547,10 @@ SCM identity, peer PIDs and active console session. It pins the service installa
 for its lifetime and approved packaged application code while each Main process is alive.
 Workers are fixed-purpose children in kill-on-close jobs
 with local-only, bounded, timed pipes. Uninstall/upgrade waits for the service to
-stop and its process to exit before removing binaries. Removal deletes only the
+stop and its process to exit before removing binaries, including a process that was
+already stopping. Setup copies host/input bytes through an exclusive handle after
+Authenticode verification against the elevated helper, then re-checks the destination.
+Removal deletes only the
 fixed service payload and authorization files, never the user's application directory.
 The existing application uninstall/upgrade hook removes the service; a subsequent
 application upgrade therefore still requires enabling lock screen control again.

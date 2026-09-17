@@ -1,10 +1,15 @@
 use crate::win::*;
+use sha2::{Digest, Sha256};
 use std::os::windows::fs::MetadataExt;
 use std::{
-    mem,
+    io, mem,
     path::{Path, PathBuf},
     ptr,
 };
+#[cfg(not(any(feature = "development", test)))]
+use windows_sys::Win32::Security::Cryptography::*;
+#[cfg(not(any(feature = "development", test)))]
+use windows_sys::Win32::Security::WinTrust::*;
 use windows_sys::Win32::{
     Foundation::*, Security::Authorization::*, Security::*, Storage::FileSystem::*,
     System::SystemServices::*, UI::Shell::*,
@@ -18,6 +23,19 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
             .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy()),
         _ => false,
     }
+}
+
+pub fn path_is_within(child: &Path, parent: &Path) -> bool {
+    let (Ok(child), Ok(parent)) = (child.canonicalize(), parent.canonicalize()) else {
+        return false;
+    };
+    let child: Vec<_> = child.components().collect();
+    let parent: Vec<_> = parent.components().collect();
+    child.len() >= parent.len()
+        && child
+            .iter()
+            .zip(&parent)
+            .all(|(a, b)| a.as_os_str().eq_ignore_ascii_case(b.as_os_str()))
 }
 
 // Code paths only: no userData, workspace, or parent-directory permission changes.
@@ -647,6 +665,406 @@ pub fn create_protected_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn sharing_conflict(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code) if code == ERROR_SHARING_VIOLATION as i32 || code == ERROR_LOCK_VIOLATION as i32
+    )
+}
+
+pub fn read_descriptor(path: &Path) -> Result<String> {
+    let handle = open_path(path, true)?;
+    let information =
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut sd = ptr::null_mut();
+    let code = unsafe {
+        GetSecurityInfo(
+            handle.0,
+            SE_FILE_OBJECT,
+            information,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    let mut text = ptr::null_mut();
+    let ok = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            sd,
+            1,
+            information,
+            &mut text,
+            ptr::null_mut(),
+        )
+    };
+    let result = if ok == 0 || text.is_null() {
+        Err(error())
+    } else {
+        unsafe {
+            let mut length = 0;
+            while *text.add(length) != 0 {
+                length += 1;
+            }
+            Ok(String::from_utf16_lossy(std::slice::from_raw_parts(
+                text, length,
+            )))
+        }
+    };
+    unsafe {
+        if !text.is_null() {
+            LocalFree(text.cast());
+        }
+        LocalFree(sd);
+    }
+    result
+}
+
+pub fn restore_descriptor(path: &Path, descriptor: &str) -> Result<()> {
+    secure_code_with_descriptor(path, descriptor)
+}
+
+#[derive(Clone)]
+pub struct AclSnapshot {
+    pub paths: Vec<(PathBuf, String)>,
+}
+
+impl AclSnapshot {
+    pub fn capture(paths: &[PathBuf]) -> Result<Self> {
+        let mut captured = Vec::new();
+        for path in paths {
+            match open_path(path, false) {
+                Ok(_) => {
+                    if check_paths(vec![path.clone()]).is_ok() {
+                        continue;
+                    }
+                    captured.push((path.clone(), read_descriptor(path)?));
+                }
+                Err(error) => {
+                    if check_paths(vec![path.clone()]).is_ok() {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(Self { paths: captured })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "paths": self.paths.iter().map(|(path, descriptor)| {
+                serde_json::json!({
+                    "path": path,
+                    "descriptor": descriptor,
+                })
+            }).collect::<Vec<_>>(),
+        }))
+        .expect("serializable ACL snapshot")
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| error())?;
+        let object = value.as_object().ok_or_else(error)?;
+        if object.len() != 2 || value["version"] != 1 {
+            return denied();
+        }
+        let mut paths = Vec::new();
+        for entry in value["paths"].as_array().ok_or_else(error)? {
+            let path = PathBuf::from(entry["path"].as_str().ok_or_else(error)?);
+            let descriptor = entry["descriptor"]
+                .as_str()
+                .filter(|value| !value.is_empty() && !value.contains('\0'))
+                .map(String::from)
+                .ok_or_else(error)?;
+            if !crate::installation::is_local_application_path(&path) {
+                return denied();
+            }
+            paths.push((path, descriptor));
+        }
+        Ok(Self { paths })
+    }
+
+    pub fn restore(&self) -> Result<()> {
+        for (path, descriptor) in &self.paths {
+            if path.exists() {
+                restore_descriptor(path, descriptor)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct AclRestoreGuard {
+    snapshot: AclSnapshot,
+    committed: bool,
+}
+
+impl AclRestoreGuard {
+    pub fn new(snapshot: AclSnapshot) -> Self {
+        Self {
+            snapshot,
+            committed: false,
+        }
+    }
+
+    pub fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for AclRestoreGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.snapshot.restore();
+        }
+    }
+}
+
+fn hash_handle(handle: &Handle) -> Result<[u8; 32]> {
+    if unsafe { SetFilePointerEx(handle.0, 0, ptr::null_mut(), FILE_BEGIN) } == 0 {
+        return Err(error());
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let mut read = 0;
+        if unsafe {
+            ReadFile(
+                handle.0,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                &mut read,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(error());
+        }
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read as usize]);
+    }
+    if unsafe { SetFilePointerEx(handle.0, 0, ptr::null_mut(), FILE_BEGIN) } == 0 {
+        return Err(error());
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn open_payload(path: &Path) -> Result<Handle> {
+    let handle = open_path(path, false)?;
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(handle.0, &mut info) } == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0
+        || info.nNumberOfLinks != 1
+    {
+        return denied();
+    }
+    Ok(handle)
+}
+
+#[cfg(not(any(feature = "development", test)))]
+fn signer_thumbprint(path: &Path) -> Result<Vec<u8>> {
+    let path = wide(&path.to_string_lossy());
+    let mut store = ptr::null_mut();
+    let mut message = ptr::null_mut();
+    let mut context = ptr::null_mut();
+    if unsafe {
+        CryptQueryObject(
+            CERT_QUERY_OBJECT_FILE,
+            path.as_ptr().cast(),
+            CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
+            CERT_QUERY_FORMAT_FLAG_BINARY,
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut store,
+            &mut message,
+            &mut context,
+        )
+    } == 0
+        || context.is_null()
+    {
+        if !message.is_null() {
+            unsafe {
+                CryptMsgClose(message);
+            }
+        }
+        if !store.is_null() {
+            unsafe {
+                CertCloseStore(store, 0);
+            }
+        }
+        return Err(error());
+    }
+    let mut size = 0;
+    let mut thumbprint = Vec::new();
+    let ok = unsafe {
+        CertGetCertificateContextProperty(
+            context.cast(),
+            CERT_HASH_PROP_ID,
+            ptr::null_mut(),
+            &mut size,
+        ) != 0
+            && {
+                thumbprint.resize(size as usize, 0);
+                CertGetCertificateContextProperty(
+                    context.cast(),
+                    CERT_HASH_PROP_ID,
+                    thumbprint.as_mut_ptr().cast(),
+                    &mut size,
+                ) != 0
+            }
+    };
+    unsafe {
+        CertFreeCertificateContext(context.cast());
+        if !message.is_null() {
+            CryptMsgClose(message);
+        }
+        if !store.is_null() {
+            CertCloseStore(store, 0);
+        }
+    }
+    if !ok || thumbprint.is_empty() {
+        return denied();
+    }
+    thumbprint.truncate(size as usize);
+    Ok(thumbprint)
+}
+
+fn verify_authenticode(path: &Path, handle: HANDLE) -> Result<()> {
+    #[cfg(any(feature = "development", test))]
+    {
+        let _ = (path, handle);
+        return Ok(());
+    }
+    #[cfg(not(any(feature = "development", test)))]
+    {
+        let path_wide = wide(&path.to_string_lossy());
+        let mut file = WINTRUST_FILE_INFO {
+            cbStruct: mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+            pcwszFilePath: path_wide.as_ptr(),
+            hFile: handle,
+            pgKnownSubject: ptr::null_mut(),
+        };
+        let mut data = WINTRUST_DATA {
+            cbStruct: mem::size_of::<WINTRUST_DATA>() as u32,
+            pPolicyCallbackData: ptr::null_mut(),
+            pSIPClientData: ptr::null_mut(),
+            dwUIChoice: WTD_UI_NONE,
+            fdwRevocationChecks: WTD_REVOKE_NONE,
+            dwUnionChoice: WTD_CHOICE_FILE,
+            Anonymous: WINTRUST_DATA_0 { pFile: &mut file },
+            dwStateAction: WTD_STATEACTION_VERIFY,
+            hWVTStateData: ptr::null_mut(),
+            pwszURLReference: ptr::null_mut(),
+            dwProvFlags: WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE,
+            dwUIContext: WTD_UICONTEXT_INSTALL,
+            pSignatureSettings: ptr::null_mut(),
+        };
+        let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        let status = unsafe {
+            WinVerifyTrust(
+                INVALID_HANDLE_VALUE,
+                &mut action,
+                (&mut data as *mut WINTRUST_DATA).cast(),
+            )
+        };
+        data.dwStateAction = WTD_STATEACTION_CLOSE;
+        unsafe {
+            WinVerifyTrust(
+                INVALID_HANDLE_VALUE,
+                &mut action,
+                (&mut data as *mut WINTRUST_DATA).cast(),
+            );
+        }
+        if status != 0 {
+            return denied();
+        }
+        Ok(())
+    }
+}
+
+pub fn copy_protected_payload(source: &Path, destination: &Path) -> Result<()> {
+    let source_handle = open_payload(source)?;
+    verify_authenticode(source, source_handle.0)?;
+    let expected = hash_handle(&source_handle)?;
+    #[cfg(not(any(feature = "development", test)))]
+    {
+        let host = std::env::current_exe()?;
+        if signer_thumbprint(source)? != signer_thumbprint(&host)? {
+            return denied();
+        }
+    }
+    let destination_handle = Handle::new(unsafe {
+        CreateFileW(
+            wide(&destination.to_string_lossy()).as_ptr(),
+            GENERIC_WRITE | GENERIC_READ | FILE_READ_ATTRIBUTES,
+            0,
+            ptr::null(),
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    })?;
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(destination_handle.0, &mut info) } == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return denied();
+    }
+    let mut buffer = [0u8; 8192];
+    loop {
+        let mut read = 0;
+        if unsafe {
+            ReadFile(
+                source_handle.0,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                &mut read,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(error());
+        }
+        if read == 0 {
+            break;
+        }
+        let mut written = 0;
+        if unsafe {
+            WriteFile(
+                destination_handle.0,
+                buffer.as_ptr().cast(),
+                read,
+                &mut written,
+                ptr::null_mut(),
+            )
+        } == 0
+            || written != read
+        {
+            return Err(error());
+        }
+    }
+    if unsafe { FlushFileBuffers(destination_handle.0) } == 0 {
+        return Err(error());
+    }
+    drop(destination_handle);
+    let copied = open_payload(destination)?;
+    verify_authenticode(destination, copied.0)?;
+    if hash_handle(&copied)? != expected {
+        return denied();
+    }
+    Ok(())
+}
+
 pub fn require_elevated() -> Result<()> {
     let caller = token(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() })?;
     let mut elevation: TOKEN_ELEVATION = unsafe { mem::zeroed() };
@@ -850,6 +1268,71 @@ mod tests {
         std::fs::write(&code, b"released").unwrap();
     }
     #[test]
+    fn live_writers_block_hardening_before_any_acl_change() {
+        let fixture = Fixture::new();
+        let code = fixture.0.join("Cindy.exe");
+        std::fs::write(&code, b"fixture").unwrap();
+        let before = descriptor(&code);
+        let writer = std::fs::OpenOptions::new().write(true).open(&code).unwrap();
+        let error = AclSnapshot::capture(&[code.clone()]).unwrap_err();
+        assert!(sharing_conflict(&error));
+        assert_eq!(descriptor(&code), before);
+        drop(writer);
+        std::fs::write(&code, b"still writable").unwrap();
+    }
+    #[test]
+    fn captured_permissions_are_restored_after_hardening() {
+        let fixture = Fixture::new();
+        let code = fixture.0.join("Cindy.exe");
+        std::fs::write(&code, b"fixture").unwrap();
+        let before = descriptor(&code);
+        let snapshot = AclSnapshot::capture(&[code.clone()]).unwrap();
+        let sid = token_user_sid(
+            token(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() })
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        secure_code_with_descriptor(&code, &format!("O:{sid}D:P(A;;FR;;;{sid})")).unwrap();
+        assert_ne!(descriptor(&code), before);
+        snapshot.restore().unwrap();
+        assert_eq!(descriptor(&code), before);
+        std::fs::write(&code, b"writable again").unwrap();
+        let restored = AclSnapshot::decode(&snapshot.encode()).unwrap();
+        assert_eq!(restored.paths, snapshot.paths);
+        assert!(AclSnapshot::decode(br"{}").is_err());
+        assert!(AclSnapshot::decode(
+            br#"{"version":1,"paths":[{"path":"\\\\server\\share\\Cindy.exe","descriptor":"O:BAD:P"}]}"#
+        )
+        .is_err());
+    }
+    #[test]
+    fn exclusive_payload_copy_preserves_bytes_and_rejects_open_writers() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("cindy-windows-desktop-input.exe");
+        let destination = fixture.0.join("copied.exe");
+        std::fs::write(&source, b"trusted-payload").unwrap();
+        copy_protected_payload(&source, &destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"trusted-payload");
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        assert!(copy_protected_payload(&source, &fixture.0.join("blocked.exe")).is_err());
+        drop(writer);
+    }
+    #[test]
+    fn application_restore_paths_cannot_escape_the_install_root() {
+        let fixture = Fixture::new();
+        let app = fixture.0.join("Cindy");
+        let nested = app.join("resources");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("app.asar"), b"fixture").unwrap();
+        assert!(path_is_within(&nested.join("app.asar"), &app));
+        assert!(!path_is_within(&fixture.0, &app));
+        assert!(!path_is_within(&fixture.0.join("Cindy.bak"), &app));
+    }
+    #[test]
     fn the_permission_plan_covers_runtime_code_not_workspaces_or_user_data() {
         let fixture = Fixture::new();
         let app = fixture.0.join("Custom Cindy Location");
@@ -989,13 +1472,21 @@ mod tests {
             assert!(!acl.is_null());
             let mut mask = 0;
             unsafe {
-                for index in 0..(*acl).AceCount as u32 {
+                let count = (*acl).AceCount as u32;
+                for index in 0..count {
                     let mut ace = ptr::null_mut();
-                    assert_ne!(GetAce(acl, index, &mut ace), 0);
-                    if (*ace.cast::<ACE_HEADER>()).AceType as u32 != ACCESS_ALLOWED_ACE_TYPE {
+                    if GetAce(acl, index, &mut ace) == 0 {
                         continue;
                     }
-                    let entry = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                    let Some(header) = ace.cast::<ACE_HEADER>().as_ref() else {
+                        continue;
+                    };
+                    if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE {
+                        continue;
+                    }
+                    let Some(entry) = ace.cast::<ACCESS_ALLOWED_ACE>().as_ref() else {
+                        continue;
+                    };
                     if IsWellKnownSid(
                         (&entry.SidStart as *const u32).cast_mut().cast(),
                         WinInteractiveSid,

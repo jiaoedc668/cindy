@@ -142,22 +142,47 @@ impl Approval {
     }
 }
 
+fn write_protected_record(directory: &std::path::Path, name: &str, bytes: &[u8]) -> Result<()> {
+    let record = directory.join(name);
+    let temporary = directory.join(format!("{name}.new"));
+    if temporary.exists() {
+        security::check_paths(vec![temporary.clone()])?;
+        fs::remove_file(&temporary)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    security::secure_code(&temporary)?;
+    if record.exists() {
+        security::check_paths(vec![record.clone()])?;
+        fs::remove_file(&record)?;
+    }
+    fs::rename(&temporary, record)?;
+    Ok(())
+}
+
 pub fn install(pid: u32) -> Result<()> {
     security::require_elevated()?;
     security::prepare_elevated_identity_query();
     let (approval, _client) = Approval::for_client(pid)?;
     let source = std::env::current_exe()?.canonicalize()?;
     let target = Installation::for_source(&source)?;
-    // Refuse missing/broken packages before changing any permissions.
-    let _application = if installation::development_identity().is_none() {
+    // Refuse missing/broken packages and live writers before changing permissions.
+    let snapshot = if installation::development_identity().is_none() {
         let paths = security::application_paths(&approval.application)?;
         let _ancestors = security::pin_ancestors(&approval.application)?;
-        for path in &paths {
-            // Preserve existing administrator/TrustedInstaller protection. Only
-            // user-writable code needs the explicitly approved in-place hardening.
-            if security::check_paths(vec![path.clone()]).is_err() {
-                security::secure_code(path)?;
-            }
+        Some(security::AclSnapshot::capture(&paths)?)
+    } else {
+        None
+    };
+    let mut restore = snapshot.clone().map(security::AclRestoreGuard::new);
+    let _application = if let Some(snapshot) = &snapshot {
+        for (path, _) in &snapshot.paths {
+            security::secure_code(path)?;
         }
         security::protect_application(&approval.application)?
     } else {
@@ -175,31 +200,26 @@ pub fn install(pid: u32) -> Result<()> {
         if destination.exists() {
             security::check_paths(vec![destination.clone()])?;
         }
-        fs::copy(source.with_file_name(name), &destination)?;
+        security::copy_protected_payload(&source.with_file_name(name), &destination)?;
         security::secure_code(&destination)?;
     }
-    let record = target.directory.join(installation::APPROVAL);
-    let temporary = target.directory.join("authorization.new");
-    // Both names are in the pinned administrator-owned directory; no untrusted
-    // path or recursive deletion is accepted by setup.
-    if temporary.exists() {
-        security::check_paths(vec![temporary.clone()])?;
-        fs::remove_file(&temporary)?;
+    if let Some(snapshot) = &snapshot {
+        write_protected_record(
+            &target.directory,
+            installation::ACL_RESTORE,
+            &snapshot.encode(),
+        )?;
     }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
-    file.write_all(&approval.encode())?;
-    file.sync_all()?;
-    drop(file);
-    security::secure_code(&temporary)?;
-    if record.exists() {
-        security::check_paths(vec![record.clone()])?;
-        fs::remove_file(&record)?;
+    write_protected_record(
+        &target.directory,
+        installation::APPROVAL,
+        &approval.encode(),
+    )?;
+    crate::service::install()?;
+    if let Some(restore) = restore.as_mut() {
+        restore.commit();
     }
-    fs::rename(&temporary, record)?;
-    crate::service::install()
+    Ok(())
 }
 
 pub fn remove() -> Result<()> {
@@ -211,9 +231,38 @@ pub fn remove() -> Result<()> {
     security::require_elevated()?;
     let ancestors = security::pin_ancestors(&installation.directory)?;
     security::check_paths(vec![installation.directory.clone()])?;
+    let application = Approval::read().ok().map(|approval| approval.application);
+    let restore = installation.directory.join(installation::ACL_RESTORE);
+    let snapshot = if restore.exists() {
+        security::check_paths(vec![restore.clone()])?;
+        let mut bytes = Vec::new();
+        fs::File::open(&restore)?
+            .take(1_048_577)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 1_048_576 {
+            return denied();
+        }
+        Some(security::AclSnapshot::decode(&bytes)?)
+    } else {
+        None
+    };
+    if let Some(snapshot) = &snapshot {
+        for (path, descriptor) in &snapshot.paths {
+            let allowed = match &application {
+                Some(root) => security::path_is_within(path, root),
+                None => installation::is_local_application_path(path),
+            };
+            if allowed && path.exists() {
+                security::restore_descriptor(path, descriptor)?;
+            }
+        }
+    }
     for name in [
         installation::APPROVAL,
         "authorization.new",
+        "authorization.json.new",
+        installation::ACL_RESTORE,
+        "acl-restore.json.new",
         installation::INPUT,
         installation::HOST,
     ] {
@@ -224,7 +273,8 @@ pub fn remove() -> Result<()> {
         }
     }
     drop(ancestors);
-    fs::remove_dir(&installation.directory)
+    fs::remove_dir(&installation.directory)?;
+    Ok(())
 }
 
 #[cfg(test)]
