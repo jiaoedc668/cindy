@@ -12,6 +12,7 @@ import type { Session } from '@/lib/ccAgent.types';
 import { toast } from '@/lib/toast';
 import { remoteProjectsStore } from './remoteProjectsStore';
 import { bindSharedTaskPushOwner } from '@/lib/remoteDataOwnerPushFence';
+import { sessionMeetingErrorKey } from './sessionMeetingCompatibility';
 
 /** Invitation secrets remain in this form and the authenticated Main request only. */
 export function JoinSessionMeetingDialog({ open, onOpenChange }: { open: boolean; onOpenChange(open: boolean): void }) {
@@ -40,7 +41,7 @@ export function JoinSessionMeetingDialog({ open, onOpenChange }: { open: boolean
     const owner = getDataOwnerGeneration();
     const current = () => captured === epoch.current && isDataOwnerGenerationCurrent(owner);
     try { await work(current); }
-    catch { if (current()) toast.error(t('sessionMeeting.retry')); }
+    catch (error) { if (current()) toast.error(t(sessionMeetingErrorKey(error))); }
     finally { if (captured === epoch.current) { pending.current = false; setBusy(false); } }
   };
   const join = () => {

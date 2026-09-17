@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { WINDOW_NO_DRAG_STYLE } from '@/components/layout/windowDrag';
 import { toast } from '@/lib/toast';
-import { extractIpcError } from '@/utils/ipcError';
+import { sessionMeetingErrorKey } from './sessionMeetingCompatibility';
 
 /** Owner controls use the same task host locally and through own-device control. */
 export function SessionMeetingButton({ session }: { session: Session }) {
@@ -28,30 +28,25 @@ export function SessionMeetingButton({ session }: { session: Session }) {
     : window.electronAPI.sessionMeeting.host(command), [session.deviceLinkDeviceId]);
   const load = useCallback(async (captured: number) => {
     const owner = getDataOwnerGeneration();
-    const result: SessionMeetingHostState = guestMeetingId
-      ? { available: true, detail: await window.electronAPI.sessionMeeting.account({ action: 'get', meetingId: guestMeetingId }) as SessionMeetingDetail }
-      : await host({ action: 'state', sessionId: session.id }) as SessionMeetingHostState;
-    if (captured === epoch.current && isDataOwnerGenerationCurrent(owner)) setState(result);
+    try {
+      const result: SessionMeetingHostState = guestMeetingId
+        ? { available: true, detail: await window.electronAPI.sessionMeeting.account({ action: 'get', meetingId: guestMeetingId }) as SessionMeetingDetail }
+        : await host({ action: 'state', sessionId: session.id }) as SessionMeetingHostState;
+      if (captured === epoch.current && isDataOwnerGenerationCurrent(owner)) setState(result);
+    } catch (error) {
+      if (captured === epoch.current && isDataOwnerGenerationCurrent(owner)
+          && sessionMeetingErrorKey(error) === 'sessionMeeting.upgrade') {
+        setState({ available: false, detail: null });
+      }
+    }
   }, [guestMeetingId, host, session.id]);
   useEffect(() => {
     const captured = ++epoch.current;
     setState(null);
     pending.current = false; setBusy(false);
-    void load(captured).catch((error: unknown) => {
-      const code = extractIpcError(error)?.code;
-      if (code === 'DEVICE_LINK_CHANNEL_NOT_ALLOWED' || code === 'DEVICE_LINK_VERSION_MISMATCH') {
-        if (captured === epoch.current) setState({ available: false, detail: null });
-      }
-    });
+    void load(captured);
     if (!open) return () => { epoch.current++; };
-    const timer = setInterval(() => {
-      if (!pending.current) void load(captured).catch((error: unknown) => {
-        const code = extractIpcError(error)?.code;
-        if ((code === 'DEVICE_LINK_CHANNEL_NOT_ALLOWED' || code === 'DEVICE_LINK_VERSION_MISMATCH') && captured === epoch.current) {
-          setState({ available: false, detail: null });
-        }
-      });
-    }, 5_000);
+    const timer = setInterval(() => { if (!pending.current) void load(captured); }, 5_000);
     return () => { epoch.current++; clearInterval(timer); };
   }, [dataOwnerId, ownerGeneration, load, open]);
   const run = async (work: () => Promise<unknown>, reload = true) => {
@@ -61,7 +56,7 @@ export function SessionMeetingButton({ session }: { session: Session }) {
     const owner = getDataOwnerGeneration();
     const current = () => captured === epoch.current && isDataOwnerGenerationCurrent(owner);
     try { await work(); if (reload && current()) await load(captured); }
-    catch { if (current()) toast.error(t('sessionMeeting.retry')); }
+    catch (error) { if (current()) toast.error(t(sessionMeetingErrorKey(error))); }
     finally { if (captured === epoch.current) { pending.current = false; setBusy(false); } }
   };
   const detail = state?.detail?.status === 'active' ? state.detail : null;

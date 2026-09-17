@@ -158,7 +158,7 @@ import { createVisualMockDeviceLinkContext, seedVisualMockStore } from '@/debug/
 
 export interface DeviceLinkContextValue {
   status: DeviceLinkStatus;
-  /** Whether the connected relay advertised shared-task routing. */
+  /** Current online relay capability; undefined while not connected. */
   sessionMeetingAvailable?: boolean;
   /** Peers with queued, running, or retrying recovery work. Read-only UI projection. */
   recoveringDeviceIds: ReadonlySet<string>;
@@ -394,7 +394,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
   // 发起代仍为当前代时登记远端 ACK,避免迟到成功覆盖较新的 unsubscribe。
   const backgroundReleaseGenerationRef = useRef(0);
   const [status, setStatus] = useState<DeviceLinkStatus>('stopped');
-  const [sessionMeetingAvailable, setSessionMeetingAvailable] = useState(false);
+  const [sessionMeetingAvailable, setSessionMeetingAvailable] = useState<boolean | undefined>();
   const [connectionIssue, setConnectionIssue] = useState<DeviceLinkConnectionIssue | null>(null);
   const [presenceVersion, setPresenceVersion] = useState(0);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
@@ -815,6 +815,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       presenceUnavailableVerdictsRef.current.clear();
       backgroundReleaseInFlightRef.current = false;
       setStatus('stopped');
+      setSessionMeetingAvailable(undefined);
       setConnectionIssue(null);
       // 登出 / 进程内切号:清掉所有 per-account 残留,避免下一个账号串到上一个账号的数据。
       // - 供应商目录是 module 级单例缓存(useDeviceProviders 按 deviceId 命中),不随组件卸载清;
@@ -888,8 +889,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     const offIssue = client.onConnectionIssue(setConnectionIssue);
     const offStatus = client.onStatusChange((next) => {
       setStatus(next);
-      setSessionMeetingAvailable(next === 'online' && typeof client.hasServerCapability === 'function'
-        && client.hasServerCapability(SESSION_MEETING_CAPABILITY));
+      setSessionMeetingAvailable(next === 'online' ? client.hasServerCapability(SESSION_MEETING_CAPABILITY) : undefined);
       if (next !== 'online') {
         openLinkInFlightRef.current.clear();
         remoteSubscribedTopicsRef.current.clear();

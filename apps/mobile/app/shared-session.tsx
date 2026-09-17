@@ -10,6 +10,7 @@ import { goBackGuarded } from '@/utils/backGuard';
 import { getMobileAuthOwner, isMobileAuthOwnerCurrent } from '@/auth/authOwnerGeneration';
 import { useDeviceLink } from '@/device-link/DeviceLinkContext';
 import { useSessionMeetingApi } from '@/device-link/useSessionMeetingApi';
+import { sessionMeetingErrorKey } from '@/device-link/sessionMeetingCompatibility';
 import { Text, TextInput } from '@/components/AppText';
 import { MainWindowActionButton, MainWindowRowButton } from '@/components/MobilePrimitives';
 import { SimpleStackHeader, simpleScreenSafeAreaEdges } from '@/platform/chrome/SimpleStackHeader';
@@ -44,7 +45,7 @@ export default function SharedSessionScreen() {
   const load = useCallback(async () => {
     const captured = epoch.current;
     const owner = getMobileAuthOwner();
-    if (!isAuthenticated || link.sessionMeetingAvailable === false) return;
+    if (!isAuthenticated || link.sessionMeetingAvailable !== true) return;
     if (sessionId && deviceId) {
       const value = guestId ? { available: true, detail: await api.get(guestId) }
         : await host({ action: 'state', sessionId }) as SessionMeetingHostState;
@@ -58,26 +59,43 @@ export default function SharedSessionScreen() {
     mounted.current = true;
     epoch.current++; pending.current = false; setBusy(false);
     setState(null); setTasks([]); setInvitation(''); setName(''); setNotice('');
+    return () => { mounted.current = false; epoch.current++; };
+  }, [accountGeneration, deviceId, sessionId]);
+  useEffect(() => {
     let disposed = false;
     let polling = false;
     const poll = async () => {
       if (disposed || polling || pending.current) return;
       polling = true;
-      try { await load(); } catch { if (!disposed) setNotice(t('sessionMeeting.retry')); }
+      const owner = getMobileAuthOwner();
+      try {
+        await load();
+        if (!disposed && isMobileAuthOwnerCurrent(owner)) setNotice('');
+      } catch (error) {
+        if (!disposed && isMobileAuthOwnerCurrent(owner)) {
+          const key = sessionMeetingErrorKey(error);
+          if (key === 'sessionMeeting.upgrade' && sessionId) setState({ available: false, detail: null });
+          else setNotice(t(key));
+        }
+      }
       finally { polling = false; }
     };
     void poll();
     const timer = setInterval(() => { void poll(); }, 5_000);
-    return () => { disposed = true; mounted.current = false; epoch.current++; clearInterval(timer); };
-  }, [accountGeneration, load, t]);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [accountGeneration, load, sessionId, t]);
   const run = async (work: (current: () => boolean) => Promise<void>, reload = true) => {
     if (pending.current) return;
     pending.current = true; setBusy(true); setNotice('');
     const owner = getMobileAuthOwner();
     const captured = epoch.current;
     const current = () => mounted.current && captured === epoch.current && isMobileAuthOwnerCurrent(owner);
+    if (link.sessionMeetingAvailable !== true) {
+      setNotice(t(link.sessionMeetingAvailable === false ? 'sessionMeeting.upgrade' : 'sessionMeeting.retry'));
+      pending.current = false; setBusy(false); return;
+    }
     try { await work(current); if (reload && current()) await load(); }
-    catch { if (current()) setNotice(t('sessionMeeting.retry')); }
+    catch (error) { if (current()) setNotice(t(sessionMeetingErrorKey(error))); }
     finally { if (captured === epoch.current) { pending.current = false; setBusy(false); } }
   };
   const openTask = async (meetingId: string, current: () => boolean) => {
@@ -96,7 +114,7 @@ export default function SharedSessionScreen() {
     <SimpleStackHeader title={t(sessionId ? 'sessionMeeting.title' : 'sessionMeeting.join')} onBack={() => goBackGuarded(router)} />
     <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
       {!!notice && <Text accessibilityRole="alert" style={styles.text}>{notice}</Text>}
-      {!isAuthenticated ? <Text style={styles.text}>{t('sessionMeeting.login')}</Text> : link.sessionMeetingAvailable === false ? <Text style={styles.text}>{t('sessionMeeting.upgrade')}</Text> : sessionId && deviceId ? <>
+      {!isAuthenticated ? <Text style={styles.text}>{t('sessionMeeting.login')}</Text> : link.sessionMeetingAvailable !== true ? <Text style={styles.text}>{t(link.sessionMeetingAvailable === false ? 'sessionMeeting.upgrade' : 'sessionMeeting.retry')}</Text> : sessionId && deviceId ? <>
         {!state ? <Text style={styles.text}>{t('sessionMeeting.sharing')}</Text> : !state.available ? <Text style={styles.text}>{t('sessionMeeting.upgrade')}</Text> : !detail ?
           !guestId && <><Text style={styles.text}>{t('sessionMeeting.sharing')}</Text><MainWindowActionButton action={{ label: t('sessionMeeting.open'), busy: busy, onPress: () => void run(async () => { await host({ action: 'open', sessionId }); }) }} /></> : <>
           <Text style={styles.text}>{t('sessionMeeting.host')}</Text>

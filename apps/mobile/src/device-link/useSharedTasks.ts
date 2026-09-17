@@ -13,7 +13,7 @@ export function useSharedTasks(): void {
   const api = useSessionMeetingApi();
   const { openLink, closeLink, invoke, status, sessionMeetingAvailable } = useDeviceLink();
   useEffect(() => {
-    if (!isAuthenticated || status !== 'online' || sessionMeetingAvailable === false) return;
+    if (!isAuthenticated || status !== 'online' || sessionMeetingAvailable !== true) return;
     const owner = getMobileAuthOwner();
     let disposed = false;
     let busy = false;
