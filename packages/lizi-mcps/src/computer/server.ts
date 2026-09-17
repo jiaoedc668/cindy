@@ -20,10 +20,19 @@ import {
   COMPUTER_TOOLS,
   COMPUTER_TOOL_NAMES,
   getComputerTool,
-} from './tools.js';
-import { logToolResultErrorCode } from '../tool-error-telemetry.js';
-import { WindowSnapshotTracker } from './snapshot-tracker.js';
-import { computerResultOutcome } from './result.js';
+  POSTCHECK_ACTION_TOOLS,
+} from "./tools.js";
+import { logToolResultErrorCode } from "../tool-error-telemetry.js";
+import { WindowSnapshotTracker } from "./snapshot-tracker.js";
+import { computerResultOutcome, isUnavailableWindowObservation } from "./result.js";
+import {
+  canLocateRunningApp,
+  exactInstalledAppBundle,
+  exactRunningApp,
+  isAppNameResolutionFailure,
+  isWindowIdentityFailure,
+  readForRecovery,
+} from "./recovery.js";
 
 export interface ComputerMcpServerOptions {
   sessionId?: string;
@@ -477,10 +486,32 @@ export function createComputerMcpServer(
     // 快照代际护栏:element_index 指向"某次 get_window_state 的第几项",观察和
     // 动作之间 UI 树变化时会静默作用到错误元素。带 snapshot_id 的动作在此校验
     // 它是否仍是目标窗口最新观察;不带的放行(过渡兼容)但打遥测日志。
-    const staleResult = checkSnapshotFreshness(name as ComputerMcpToolName, parsedData, sessionId);
+    const staleResult = checkSnapshotFreshness(
+      name as ComputerMcpToolName,
+      parsedData,
+      sessionId,
+    );
     if (staleResult) return staleResult;
-    if (typeof parsedData.snapshot_id === 'string') {
-      const driverId = snapshotTracker.driverSnapshotId(sessionId, parsedData.snapshot_id);
+    const postcondition = parsedData.postcondition;
+    delete parsedData.postcondition; // Cindy-owned verification, never part of driver action args.
+    if (postcondition && typeof parsedData.window_id !== "number") {
+      return textResult(
+        {
+          ok: false,
+          errorCode: "INVALID_ARGS",
+          data: {
+            message:
+              "postcondition requires an exact window_id or a fresh element snapshot identifying the window.",
+          },
+        },
+        true,
+      );
+    }
+    if (typeof parsedData.snapshot_id === "string") {
+      const driverId = snapshotTracker.driverSnapshotId(
+        sessionId,
+        parsedData.snapshot_id,
+      );
       if (driverId) parsedData.snapshot_id = driverId;
       else delete parsedData.snapshot_id; // Legacy drivers have no native snapshot ids.
     }
@@ -535,6 +566,9 @@ export function createComputerMcpServer(
         isUnavailableWindowObservation(data, parsedData)
       ) {
         invalidateWindowSnapshot(name, parsedData, sessionId);
+        const recovery = isWindowIdentityFailure(data)
+          ? await rediscoverWindow(parsedData, { ...callContext, signal })
+          : undefined;
         return textResult(
           {
             ok: false,
@@ -542,37 +576,307 @@ export function createComputerMcpServer(
             errorCode: 'CUA_UNAVAILABLE',
             hint: 'The requested window observation failed. Do not reuse earlier snapshot IDs, element indices or coordinates. Check status/check_permissions and refresh list_windows for the target; after the window or capture state recovers, call get_window_state again. Repeated capture failure requires recovery before further actions.',
             data,
+            ...(recovery ? { recovery } : {}),
           },
           true,
         );
       }
-      const outcome = computerResultOutcome(name, data);
-      const snapshotId = recordWindowSnapshot(name as ComputerMcpToolName, parsedData, data, sessionId);
-      return textResult({
-        ...outcome,
-        tool: name,
-        ...(snapshotId ? { snapshot_id: snapshotId } : {}),
-        data,
-      }, !outcome.ok);
+      let outcome = computerResultOutcome(name, data);
+      const recovery =
+        name !== "get_window_state" && isWindowIdentityFailure(data)
+          ? await rediscoverWindow(parsedData, { ...callContext, signal })
+          : undefined;
+      const postcheck =
+        !recovery &&
+        POSTCHECK_ACTION_TOOLS.has(name as ComputerMcpToolName) &&
+        outcome.ok &&
+        (postcondition || outcome.outcome?.status === "unknown")
+          ? await checkActionState(parsedData, postcondition, {
+              ...callContext,
+              signal,
+            })
+          : undefined;
+      if (postcondition && postcheck) {
+        const checked = computerResultOutcome("verify_state", postcheck.data);
+        // An interrupted multi-chunk input is not a completed action, even if a
+        // weak predicate happens to match the already-written prefix.
+        const remaining = (data as { remaining_chars?: number } | null)
+          ?.remaining_chars;
+        if (postcheck.ok && !(typeof remaining === "number" && remaining > 0))
+          outcome = checked;
+        else if (!postcheck.ok) outcome = checked;
+      }
+      if (signal?.aborted)
+        throw Object.assign(
+          new Error("Computer Use cancelled during recovery"),
+          { outcomeUnknown: !def.readOnly },
+        );
+      const snapshotId = recovery
+        ? undefined
+        : recordWindowSnapshot(
+            name as ComputerMcpToolName,
+            parsedData,
+            data,
+            sessionId,
+          );
+      return textResult(
+        {
+          ...outcome,
+          tool: name,
+          ...(snapshotId ? { snapshot_id: snapshotId } : {}),
+          data,
+          ...(recovery ? { recovery } : {}),
+          ...(postcheck ? { postcheck } : {}),
+        },
+        !outcome.ok,
+      );
     } catch (err) {
+      const errorCode = signal?.aborted
+        ? "REQUEST_CANCELLED"
+        : typeof (err as { code?: unknown })?.code === "string"
+          ? (err as { code: string }).code
+          : "COMPUTER_DRIVER_ERROR";
+      const windowUnresolved = isWindowIdentityFailure(err);
       invalidateWindowSnapshot(name, parsedData, sessionId);
-      if ((signal?.aborted || (err as { outcomeUnknown?: boolean })?.outcomeUnknown)
-        && typeof parsedData.pid === 'number' && typeof parsedData.window_id === 'number') {
-        snapshotTracker.invalidate(sessionId, parsedData.pid, parsedData.window_id);
+      if (
+        (windowUnresolved ||
+          signal?.aborted ||
+          (err as { outcomeUnknown?: boolean })?.outcomeUnknown) &&
+        typeof parsedData.pid === "number" &&
+        typeof parsedData.window_id === "number"
+      ) {
+        snapshotTracker.invalidate(
+          sessionId,
+          parsedData.pid,
+          parsedData.window_id,
+        );
+      }
+      const recovery =
+        windowUnresolved && !signal?.aborted
+          ? await rediscoverWindow(parsedData, { ...callContext, signal })
+          : undefined;
+      const postcheck =
+        !recovery &&
+        !signal?.aborted &&
+        errorCode !== "REQUEST_CANCELLED" &&
+        POSTCHECK_ACTION_TOOLS.has(name as ComputerMcpToolName) &&
+        (err as { outcomeUnknown?: boolean })?.outcomeUnknown
+          ? await checkActionState(parsedData, postcondition, {
+              ...callContext,
+              signal,
+            })
+          : undefined;
+      const installedDiscovery =
+        name === "launch_app" &&
+        !signal?.aborted &&
+        isAppNameResolutionFailure(parsedData, err)
+          ? await readForRecovery(
+              deps,
+              "list_apps",
+              {},
+              { ...callContext, signal },
+            )
+          : undefined;
+      const bundleId = installedDiscovery?.ok
+        ? exactInstalledAppBundle(
+            parsedData.name as string,
+            installedDiscovery.data,
+          )
+        : undefined;
+      if (bundleId && !signal?.aborted) {
+        // The first call explicitly failed before launching. Resolve the name
+        // once, preserving URLs/options; no recursive fallback after this call.
+        try {
+          const data = await callComputerTool(
+            deps,
+            "launch_app",
+            { ...parsedData, bundle_id: bundleId },
+            { ...callContext, signal },
+          );
+          if (signal?.aborted)
+            throw Object.assign(new Error("Application launch cancelled"), {
+              code: "REQUEST_CANCELLED",
+              outcomeUnknown: true,
+            });
+          const outcome = computerResultOutcome("launch_app", data);
+          return textResult(
+            {
+              ...outcome,
+              tool: name,
+              data,
+              recovery: {
+                resolved_bundle_id: bundleId,
+                discovery: installedDiscovery,
+              },
+            },
+            !outcome.ok,
+          );
+        } catch (launchError) {
+          return textResult(
+            {
+              ok: false,
+              errorCode:
+                typeof (launchError as { code?: unknown })?.code === "string"
+                  ? (launchError as { code: string }).code
+                  : "COMPUTER_DRIVER_ERROR",
+              data: {
+                message:
+                  launchError instanceof Error
+                    ? launchError.message
+                    : String(launchError),
+                ...((launchError as { outcomeUnknown?: boolean })
+                  ?.outcomeUnknown
+                  ? { outcome_unknown: true }
+                  : {}),
+              },
+              recovery: {
+                original_error:
+                  err instanceof Error ? err.message : String(err),
+                discovery: installedDiscovery,
+                resolved_bundle_id: bundleId,
+                retry_exhausted: true,
+              },
+            },
+            true,
+          );
+        }
+      }
+      const appDiscovery =
+        name === "launch_app" &&
+        !signal?.aborted &&
+        canLocateRunningApp(parsedData, err)
+          ? await readForRecovery(
+              deps,
+              "list_windows",
+              withSessionArg("list_windows", {}, sessionId),
+              { ...callContext, signal },
+            )
+          : undefined;
+      const located = appDiscovery?.ok
+        ? exactRunningApp(parsedData.name as string, appDiscovery.data)
+        : undefined;
+      if (located && !signal?.aborted) {
+        return textResult({
+          ok: true,
+          tool: name,
+          data: {
+            ...located,
+            located: true,
+            launched: false,
+            source: "running_windows",
+          },
+          recovery: {
+            original_error: {
+              code: errorCode,
+              message: err instanceof Error ? err.message : String(err),
+            },
+            discovery: appDiscovery,
+          },
+        });
       }
       return textResult(
         {
           ok: false,
-          errorCode: signal?.aborted ? 'REQUEST_CANCELLED' :
-            typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : 'COMPUTER_DRIVER_ERROR',
+          errorCode,
+          ...(recovery ? { recovery } : {}),
+          ...(postcheck ? { postcheck } : {}),
+          ...(appDiscovery || installedDiscovery
+            ? {
+                recovery: {
+                  discovery: appDiscovery,
+                  installed_discovery: installedDiscovery,
+                  next_step: "choose_application",
+                  target_selected: false,
+                },
+              }
+            : {}),
           data: {
             message: err instanceof Error ? err.message : String(err),
-            ...((err as { outcomeUnknown?: boolean })?.outcomeUnknown ? { outcome_unknown: true, next_step: 'fresh_state' } : {}),
+            ...((err as { outcomeUnknown?: boolean })?.outcomeUnknown
+              ? { outcome_unknown: true, next_step: "fresh_state" }
+              : {}),
+            ...(windowUnresolved
+              ? {
+                  next_step: "list_windows",
+                  hint: "Rediscover the target PID/window, then take fresh get_window_state before acting. Do not reuse old element references or automatically switch to a similar window.",
+                }
+              : {}),
           },
         },
         true,
       );
     }
+  }
+
+  async function rediscoverWindow(
+    args: Record<string, unknown>,
+    context: ComputerMcpCallContext,
+  ) {
+    if (typeof args.pid === "number" && typeof args.window_id === "number") {
+      snapshotTracker.invalidate(context.sessionId, args.pid, args.window_id);
+    }
+    // Enumerate afresh without the obsolete PID filter so a dev restart is
+    // visible. Candidates are evidence for the agent, not permission to retarget.
+    const discovery = await readForRecovery(
+      deps,
+      "list_windows",
+      withSessionArg("list_windows", {}, context.sessionId),
+      context,
+    );
+    return {
+      requested_target: { pid: args.pid, window_id: args.window_id },
+      discovery,
+      target_selected: false,
+      next_step: "get_window_state",
+    };
+  }
+
+  async function checkActionState(
+    args: Record<string, unknown>,
+    postcondition: unknown,
+    context: ComputerMcpCallContext,
+  ) {
+    if (typeof args.pid !== "number" || typeof args.window_id !== "number") {
+      return readForRecovery(
+        deps,
+        "list_windows",
+        withSessionArg("list_windows", { pid: args.pid }, context.sessionId),
+        context,
+      );
+    }
+    snapshotTracker.invalidate(context.sessionId, args.pid, args.window_id);
+    const tool = postcondition ? "verify_state" : "get_window_state";
+    const readArgs = {
+      pid: args.pid,
+      window_id: args.window_id,
+      ...(postcondition
+        ? {
+            expect: postcondition,
+            timeout_ms: 1500,
+            stable_samples: 2,
+            include_screenshot: false,
+          }
+        // Automatic evidence must not create unmanaged screenshots of user windows.
+        : { include_screenshot: false }),
+    };
+    const read = await readForRecovery(
+      deps,
+      tool,
+      withSessionArg(tool, readArgs, context.sessionId),
+      context,
+    );
+    if (tool === "get_window_state" && read.ok) {
+      if (isUnavailableWindowObservation(read.data, readArgs))
+        return { ...read, ok: false };
+      // This is post-action evidence, not a reusable element observation. A late
+      // automatic read must not supersede another caller's newer explicit state.
+      return {
+        ...read,
+        reusable_snapshot: false,
+        next_step: "get_window_state",
+      };
+    }
+    return read;
   }
 
   function invalidateWindowSnapshot(
@@ -1227,33 +1531,6 @@ export function createComputerMcpServer(
   return server;
 }
 
-/** Only explicit driver failure signals override legacy/partial observation success. */
-export function isUnavailableWindowObservation(
-  data: unknown,
-  args: Record<string, unknown>,
-): boolean {
-  const captureMode = typeof args.screenshot_out_file === 'string' || args.include_screenshot === true
-    ? 'vision'
-    : args.include_screenshot === false ? 'ax' : args.capture_mode;
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
-  const state = data as Record<string, unknown>;
-  if (state.ok === false || state.isError === true) return true;
-  const screenshotFailed =
-    state.screenshot_frame_valid === false ||
-    (state.screenshot_error !== undefined && state.screenshot_error !== null);
-  const hasElements =
-    Array.isArray(state.elements) && state.elements.length > 0;
-  const hasTree =
-    typeof state.tree_markdown === 'string' &&
-    state.tree_markdown.trim().length > 0;
-  const axUnavailable = state.degraded === true && !hasElements && !hasTree;
-  // A screenshot explicitly requested by vision/SOM cannot be replaced by an AX tree.
-  // Conversely, a valid vision-only result may have no AX surface or input route.
-  if (captureMode === 'vision' || captureMode === 'som')
-    return screenshotFailed;
-  if (captureMode === 'ax') return axUnavailable;
-  return screenshotFailed && axUnavailable;
-}
 
 function readDriverSnapshotId(data: unknown): string | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;

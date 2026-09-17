@@ -341,7 +341,10 @@ the Agent must successfully observe the target window again with input idle at
 both the start and end of the read and no input revision change during the read
 before acting on it, including the first action of a new or cleaned-up driver
 session. Actions without a window ID accept an observation of the same process;
-an explicit window ID still requires that exact window. Empty connection
+an explicit window ID still requires that exact window. Automatic recovery reads
+are text-only evidence, do not capture screenshots, and do not restore input permission. Failed or cancelled explicit
+reads revoke prior permission, and older concurrent reads cannot restore it.
+Empty connection
 heartbeats do not claim input ownership.
 
 The native macOS/Windows helper acknowledges a batch only after posting all its

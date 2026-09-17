@@ -264,6 +264,8 @@ const CORE_INVOKE_CHANNELS: readonly string[] = [
   // —— 读模型(被控端本地 DB 是数据真相)——
   'local-db:sessions:list',
   'local-db:sessions:get',
+  // Bounded metadata reconciliation. Old hosts reject this; controllers fall back to GET.
+  'local-db:sessions:get-many',
   // Read-only indexed task search for the remote Composer @ palette and the
   // controller sidebar task search. Older controlled clients reject this
   // channel and the controller falls back to the bounded legacy sessions:list
@@ -732,6 +734,7 @@ export const INVOKE_TIMEOUT_OVERRIDES_MS: Readonly<Record<string, number>> = {
   // 不吃满超时),不会误伤首拉重试。
   'local-db:sessions:list': 12_000,
   'local-db:sessions:get': 12_000,
+  'local-db:sessions:get-many': 12_000,
 };
 
 /**

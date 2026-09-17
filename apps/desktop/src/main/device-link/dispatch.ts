@@ -21,6 +21,7 @@ import { requestFilePeer, stopFilePeers } from './filePeer';
  * 本地 settings(第二道),server 缓存陈旧 / 被绕过时兜底。
  */
 
+import { RemoteInvokeTiming } from './remoteInvokeTiming.js';
 import {
   computeAllowlistHash,
   canCoalesceRemoteListing,
@@ -166,6 +167,7 @@ const REMOTE_INVOKE_FRAME_SAFETY_BYTES = 1024;
 // interactive activity would refresh the updater quiet period forever for sessions-only viewers.
 const UPDATE_RELAUNCH_NON_BLOCKING_INVOKE_CHANNELS: ReadonlySet<string> = new Set([
   'local-db:sessions:list',
+  'local-db:sessions:get-many',
 ]);
 const textEncoder = new TextEncoder();
 const offlinePushQueue = createOfflinePushQueue();
@@ -652,6 +654,7 @@ const REMOTE_INVOKE_IN_FLIGHT_LIMIT = 64;
 /** Host DB admission is independent of whether a read can share an in-flight snapshot. */
 const BACKGROUND_REMOTE_INVOKE_CHANNELS: ReadonlySet<string> = new Set([
   'local-db:sessions:list',
+  'local-db:sessions:get-many',
   'local-db:sessions:interrupted-pending',
   'maker:list-active',
   'local-db:bots:list',
@@ -2640,9 +2643,10 @@ async function handleInvoke(
   const releaseBusyLease = shouldAcquireRemoteInvokeBusyLease(src, payload)
     ? acquireRemoteInvokeBusyLease()
     : () => undefined;
-  const handlerStartedAt = Date.now();
+  const handlerStartedAt = performance.now();
+  const timing = new RemoteInvokeTiming();
   const executionPromise = Promise.resolve()
-    .then(() => executeInvoke(src, payload))
+    .then(() => executeInvoke(src, payload, timing))
     .catch((err): InvokeResultPayload => {
       const message = err instanceof Error ? err.message : String(err);
       log.error(`remote invoke escaped execution boundary from ${shortId(src)}: ${message}`);
@@ -2674,11 +2678,11 @@ async function handleInvoke(
   let result: InvokeResultPayload;
   try {
     result = normalizeInvokeResultForWire(await resultPromise);
-    const executionWaitMs = Date.now() - handlerStartedAt;
+    const executionWaitMs = Math.round(performance.now() - handlerStartedAt);
     if (executionWaitMs >= 1_000) {
       log.debug(`remote invoke slow execution request=${shortId(requestId)} from=${shortId(src)}`
         + ` channel=${payload && REMOTE_INVOKE_ALLOWLIST.has(payload.channel) ? payload.channel : 'unknown'}`
-        + ` executionWaitMs=${executionWaitMs} ok=${result.ok}`);
+        + ` executionWaitMs=${executionWaitMs} ok=${result.ok} stagesMs=${JSON.stringify(timing.stages)}`);
     }
     if ((remoteInvokeLinkEpoch.get(src) ?? 0) !== invokeLinkEpoch) return;
   } finally {
@@ -2708,8 +2712,9 @@ async function handleInvoke(
 async function executeInvoke(
   src: string,
   payload: InvokePayload | undefined,
+  timing: RemoteInvokeTiming,
 ): Promise<InvokeResultPayload> {
-  return await runInvoke(src, payload);
+  return await runInvoke(src, payload, timing);
 }
 
 function settleRemoteInvokeWithOrphanDeadline(
@@ -3031,7 +3036,9 @@ function trySendInvokeResult(
           }
         }
       }
-      candidate = { ok: false, error: { code, message } };
+      candidate = channel === 'local-db:sessions:get-many'
+        ? { ok: false, error: { code: 'IPC_ERROR', message: '[PRECONDITION_FAILED] REMOTE_SESSION_BATCH_TOO_LARGE' } }
+        : { ok: false, error: { code, message } };
       try {
         client.sendInvokeResult(src, requestId, candidate);
         return { sent: true, result: candidate };
@@ -3617,15 +3624,16 @@ function handleSubscriptionFrame(src: string, payload: InvokePayload): InvokeRes
 export async function runInvoke(
   src: string,
   payload: InvokePayload | undefined,
+  timing = new RemoteInvokeTiming(),
 ): Promise<InvokeResultPayload> {
-  if (!isMeetingPeer(src)) return runAuthorizedInvoke(src, payload);
+  if (!isMeetingPeer(src)) return runAuthorizedInvoke(src, payload, timing);
   const meeting = captureSessionMeetingPeer(src);
   try {
     if (!meeting || !payload) throw new Error('Meeting unavailable');
     assertSessionMeetingInvoke(meeting, payload);
     const result = await runDeviceLinkInvokeContext(
       { controllerDeviceId: src, channel: payload.channel, meeting, meetingSetting: { admitted: false } },
-      () => runAuthorizedInvoke(src, payload),
+      () => runAuthorizedInvoke(src, payload, timing),
     );
     if (!meeting.isCurrent()) throw new Error('Meeting revoked');
     return result;
@@ -3635,12 +3643,12 @@ export async function runInvoke(
 }
 
 async function runAuthorizedInvoke(
-  src: string, payload: InvokePayload | undefined,
+  src: string, payload: InvokePayload | undefined, timing: RemoteInvokeTiming,
 ): Promise<InvokeResultPayload> {
-  return withRemoteDbAdmission(payload?.channel, () => executeRemoteInvoke(src, payload));
+  return withRemoteDbAdmission(payload?.channel, () => executeRemoteInvoke(src, payload, timing));
 }
 
-async function executeRemoteInvoke(src: string, payload: InvokePayload | undefined): Promise<InvokeResultPayload> {
+async function executeRemoteInvoke(src: string, payload: InvokePayload | undefined, timing: RemoteInvokeTiming): Promise<InvokeResultPayload> {
   if (!payload || typeof payload.channel !== 'string') {
     return { ok: false, error: { code: 'INTERNAL', message: 'malformed invoke payload' } };
   }
@@ -3839,11 +3847,11 @@ async function executeRemoteInvoke(src: string, payload: InvokePayload | undefin
     const invocationOwner = broadcastTap.captureDataOwnerBroadcastScope();
     const historyView = (payload.channel === 'local-db:messages:view' || payload.channel === 'local-db:messages:view-intent')
       && typeof args[0] === 'string' ? subscriptions.prepareHistoryView(src, args[0]) : undefined;
-    if (hasRemoteBotSessionLookup()) await assertRemoteBotInvocationAllowed(args, payload.channel);
+    if (hasRemoteBotSessionLookup()) await timing.measure('authorizeBefore', () => assertRemoteBotInvocationAllowed(args, payload.channel));
     const listingCapabilities = payload.channel === 'maker:provider:list'
       ? invokeControllerCapabilities(payload)
       : [];
-    const result = await runDeviceLinkInvokeContext(
+    const result = await timing.measure('handler', () => runDeviceLinkInvokeContext(
       {
         controllerDeviceId: src,
         channel: payload.channel,
@@ -3859,18 +3867,16 @@ async function executeRemoteInvoke(src: string, payload: InvokePayload | undefin
         payload.channel,
         payload.channel === 'maker:provider:list' ? [] : args,
       ),
-    );
+    ));
     handlerCompleted = true;
-    if (hasRemoteBotSessionLookup()) await assertRemoteBotInvocationAllowed(args, payload.channel);
+    if (hasRemoteBotSessionLookup()) await timing.measure('authorizeAfter', () => assertRemoteBotInvocationAllowed(args, payload.channel));
     if (!broadcastTap.isDataOwnerBroadcastScopeCurrent(invocationOwner)) throw new Error('[NOT_FOUND] Session does not exist');
     if (getDeviceLinkInvokeContext()?.meeting?.isCurrent() === false &&
         !getDeviceLinkInvokeContext()?.meetingSetting?.admitted) throw new Error('[PERMISSION_DENIED] Meeting task access denied');
     // 远程 set-* 回流:被控端 set-* runtime-only,补一次 DB 持久化 + 广播 patched,让控制端
     // 镜像收敛到被控端真相(取代控制端乐观覆盖)。本机会话不走这条(走 renderer update)。
-    await persistRemoteSetting(payload.channel, payload.args ?? [], result);
-    return {
-      ok: true,
-      result: projectInvokeResultForTunnel(
+    await timing.measure('persist', () => persistRemoteSetting(payload.channel, payload.args ?? [], result));
+    const projected = await timing.measure('project', async () => projectInvokeResultForTunnel(
         payload.channel,
         await projectRemoteSessionResult(payload.channel, result),
         subscriptions.controllerSupports(
@@ -3879,8 +3885,9 @@ async function executeRemoteInvoke(src: string, payload: InvokePayload | undefin
         )
         || listingCapabilities.includes(CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2),
         args,
-      ),
-    };
+      ));
+    if (!broadcastTap.isDataOwnerBroadcastScopeCurrent(invocationOwner)) throw new Error('[NOT_FOUND] Session does not exist');
+    return { ok: true, result: projected };
   } catch (err) {
     // 被控端 handler 的 throwIpcError `[CODE] message` 原样透传,
     // 控制端 renderer 继续用 extractIpcError 解码

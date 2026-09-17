@@ -3923,6 +3923,7 @@ interface ElectronAPI {
         sessionId: string,
       ) => Promise<{
         messages: Record<string, unknown>[];
+        historyView?: string;
         invalidation?: number;
         ownerToken?: string;
         accountCounter?: number;
@@ -3934,6 +3935,7 @@ interface ElectronAPI {
         expectedInvalidation?: number,
         expectedOwnerToken?: string,
         expectedAccountCounter?: number,
+        historyView?: string,
       ) => Promise<{ ok: true; invalidation?: number }>;
       getSessionList: () => Promise<{
         devices: Array<{
@@ -4581,6 +4583,7 @@ interface ElectronAPI {
         source?: 'cindy-make';
       }) => Promise<import('@/lib/ccAgent.types').Session>;
       get: (id: string) => Promise<import('@/lib/ccAgent.types').Session>;
+      getMany: (ids: string[]) => Promise<import('@/lib/ccAgent.types').Session[]>;
       resolveReferences: (
         sessionIds: string[],
       ) => Promise<import('../shared/sessionReference').SessionReference[]>;

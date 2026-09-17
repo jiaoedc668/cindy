@@ -1,4 +1,5 @@
 import { RemoteTaskSuggestions } from '@/session/RemoteTaskSuggestions';
+import { isTaskSuggestionsSyncPending, useRemoteTaskSuggestionsPresentation } from '@/session/useRemoteTaskSuggestionsPresentation';
 import { countHomeSuggestionSessions, remoteTaskSuggestionsMode, type RemoteTaskSuggestionId } from '@/session/remoteTaskSuggestionsModel';
 import { cacheRemoteResourceHome, readRemoteResourceSnapshot } from '@/device-link/remoteResourceCache';
 import { canBrowseMobileHomeDevice } from '@/session/mobileHome';
@@ -1899,7 +1900,10 @@ function HomeScreenContent() {
   // 「可用」项,但缓存设备不能当 live 设备直接开新会话——列表先画出来,新建入口等 live 数据。
   const newSessionDisabled = !home.primaryDevice || (!initialHomeSettled && !hasOpenableLiveDevice);
   const taskSuggestionsDeviceId = selectedDeviceId ?? home.primaryDevice?.deviceId ?? undefined;
-  const taskSuggestionsMode = remoteTaskSuggestionsMode({
+  const taskSuggestionsSyncing = isTaskSuggestionsSyncPending(
+    homeSyncDeviceIds, homeListOwnedDeviceIdsRef.current, rawDeviceConnectionStates,
+  );
+  const taskSuggestionsCandidateMode = remoteTaskSuggestionsMode({
     sessionCount: countHomeSuggestionSessions(home,
       shouldReplaceListWithSearchResults(searchQuery, indexedSearch.status) ? indexedSearch.results : undefined),
     totalSessionCount: home.overview.all,
@@ -1908,7 +1912,9 @@ function HomeScreenContent() {
     ready: status === 'online' && !activeConnectionIssue && !initialHomeLoading && !initialHomeError && !connectionError
       && indexedSearch.status !== 'searching' && !newSessionDisabled
       && deviceModels.some((device) => device.canOpen
-        && !homeRecoveringDeviceIds.has(device.deviceId)
+        && !recoveringDeviceIds.has(device.deviceId)
+        && !unresponsiveDevices.has(device.deviceId)
+        && rawDeviceConnectionStates[device.deviceId] !== 'failed'
         && device.deviceId === taskSuggestionsDeviceId),
   });
   const newSessionDeviceOptions = useMemo(
@@ -1917,6 +1923,11 @@ function HomeScreenContent() {
       .map((item) => ({ deviceId: item.deviceId, name: item.name })),
     [deviceModels],
   );
+  const { mode: taskSuggestionsMode, pending: taskSuggestionsPending } = useRemoteTaskSuggestionsPresentation({
+    scope: JSON.stringify([accountGeneration, selectedDeviceId, taskSuggestionsDeviceId, [...homeSyncDeviceIds].sort()]),
+    candidateMode: taskSuggestionsCandidateMode,
+    syncing: taskSuggestionsSyncing,
+  });
   const selectedDeviceLabel = useMemo(() => {
     if (!selectedDeviceId) return t('devices.list.allConversations');
     // 设备列表尚未同步回来时,用偏好里存的设备名兜底,避免冷启动表头闪占位文案。
@@ -2678,7 +2689,7 @@ function HomeScreenContent() {
             <View style={styles.pinnedFooter} testID="home.pinnedFooter" />
           ) : null}
         ListEmptyComponent={
-          initialHomeLoading ? (
+          initialHomeLoading || taskSuggestionsPending ? (
             <HomeInitialLoadingState
               style={{
                 marginTop: spacing.xxl,
@@ -2746,7 +2757,7 @@ function HomeScreenContent() {
         />
       ) : null}
 
-      {showRemoteGuide || taskSuggestionsMode === 'empty' ? null : (
+      {showRemoteGuide || taskSuggestionsPending || taskSuggestionsMode === 'empty' ? null : (
         // 无可控电脑时不提供入口;完整空态已有主按钮,避免重复显示新建 CTA。
         <Pressable
           accessibilityLabel={t('devices.list.a11y.newRemoteConversation')}

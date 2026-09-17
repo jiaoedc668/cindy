@@ -206,14 +206,12 @@ describe('useDeviceProviders deviceId-aware cache', () => {
     // 无挂载 hook 的后台缓存写入路径(DeviceLinkContext provider:changed)也必须
     // mark epoch——否则断线前旧目录被当「首次挂载缓存命中」采信、永不刷新
     // (codex review P1)。捕获 epoch 在 fetch 前、mark 在成功后(失败不 mark)。
-    expect(ctxSrc).toContain('const epochAtWrite = connectionEpoch;');
-    expect(ctxSrc).toContain('markDeviceFetchEpoch(deviceId, epochAtWrite);');
+    expect(ctxSrc).toContain('connectionEpoch: () => connectionEpochRef.current');
     const ctxBlock = ctxSrc.slice(
       ctxSrc.indexOf('onProviderChanged: (deviceId) => {'),
       ctxSrc.indexOf('onProviderChanged: (deviceId) => {') + 1400,
     );
-    expect(ctxBlock).toContain('.then(() => {');
-    expect(ctxBlock).toContain('markDeviceFetchEpoch(deviceId, epochAtWrite);');
+    expect(ctxBlock).toContain('catalogRefresh.notify(deviceId);');
     // 模块级 Map + 导出存取(跨组件卸载存活)
     expect(cacheSrc).toContain('const deviceFetchEpoch = new Map<string, number>();');
     expect(cacheSrc).toContain('export function markDeviceFetchEpoch(deviceId: string, epoch: number): void');
