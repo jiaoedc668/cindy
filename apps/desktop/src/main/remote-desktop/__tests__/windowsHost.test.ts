@@ -1,0 +1,127 @@
+import path from 'node:path';
+import os from 'node:os';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const runtime = vi.hoisted(() => ({
+  app: {
+    isPackaged: true,
+    getAppPath: vi.fn(() => '/development'),
+    getPath: vi.fn(() => '/profile'),
+  },
+  exec: vi.fn(),
+  open: vi.fn(),
+  development: vi.fn(),
+}));
+vi.mock('../windowsDevelopment', () => ({
+  createWindowsDevelopmentAssets: () => ({ resolve: runtime.development }),
+}));
+vi.mock('electron', () => ({ app: runtime.app }));
+vi.mock('node:child_process', () => ({
+  execFile: Object.assign(vi.fn(), {
+    [Symbol.for('nodejs.util.promisify.custom')]: runtime.exec,
+  }),
+}));
+vi.mock('node:module', () => ({
+  createRequire: () => () => ({ DesktopConnection: { open: runtime.open } }),
+}));
+import { configureWindowsDesktopSupport, readWindowsDesktopSupport } from '../windowsHost';
+
+const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+const resourcesPath = Object.getOwnPropertyDescriptor(process, 'resourcesPath');
+const customResources = path.join(os.tmpdir(), 'custom-cindy-install', 'resources');
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  runtime.app.isPackaged = true;
+  runtime.exec.mockReset().mockResolvedValue({ stdout: 'ready\n' });
+  runtime.open.mockReset().mockResolvedValue({ close: vi.fn(), request: vi.fn() });
+  runtime.development.mockReset().mockResolvedValue(null);
+  Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+  Object.defineProperty(process, 'resourcesPath', { configurable: true, value: customResources });
+});
+afterEach(() => {
+  Object.defineProperty(process, 'platform', platform);
+  if (resourcesPath) Object.defineProperty(process, 'resourcesPath', resourcesPath);
+  else Reflect.deleteProperty(process, 'resourcesPath');
+});
+
+describe('Windows lock screen service setup', () => {
+  it('checks an installed grant from a custom app directory without requesting elevation', async () => {
+    expect(await readWindowsDesktopSupport()).toBe('ready');
+    expect(await readWindowsDesktopSupport()).toBe('ready');
+    expect(runtime.exec.mock.calls.map((call) => call[1])).toEqual([['--status'], ['--status']]);
+    expect(runtime.open).toHaveBeenCalledWith(
+      path.join(customResources, 'tools', 'remote-desktop', 'cindy-windows-desktop-host.exe'),
+      JSON.stringify({ mode: 'probe' }),
+    );
+  });
+
+  it('opens administrator setup only after an explicit enable action and verifies the real connection', async () => {
+    await configureWindowsDesktopSupport(true);
+    expect(runtime.exec.mock.calls.map((call) => call[1])).toEqual([
+      ['--elevate-install', String(process.pid)],
+      ['--status'],
+    ]);
+    expect(runtime.open).toHaveBeenCalledOnce();
+  });
+
+  it('does not enable or retry elevation after UAC is cancelled', async () => {
+    runtime.exec.mockRejectedValueOnce(new Error('UAC cancelled'));
+    await expect(configureWindowsDesktopSupport(true)).rejects.toThrow('UAC cancelled');
+    expect(runtime.exec).toHaveBeenCalledOnce();
+    expect(runtime.open).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a running service as authorization for another caller', async () => {
+    runtime.open.mockRejectedValue(new Error('caller rejected'));
+    expect(await readWindowsDesktopSupport()).toBe('missing');
+    await expect(configureWindowsDesktopSupport(true)).rejects.toThrow(
+      'DESKTOP_SYSTEM_SERVICE_UNAVAILABLE',
+    );
+  });
+
+  it('removes the service through the existing administrator action', async () => {
+    await configureWindowsDesktopSupport(false);
+    expect(runtime.exec.mock.calls.map((call) => call[1])).toEqual([['--elevate-uninstall']]);
+    expect(runtime.open).not.toHaveBeenCalled();
+  });
+
+  it('keeps the macOS permission flow unchanged and makes Dev setup available without compiling during a probe', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    expect(await readWindowsDesktopSupport()).toBeUndefined();
+    await expect(configureWindowsDesktopSupport(true)).rejects.toThrow(
+      'DESKTOP_SYSTEM_SERVICE_UNAVAILABLE',
+    );
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    runtime.app.isPackaged = false;
+    expect(await readWindowsDesktopSupport()).toBe('missing');
+    expect(runtime.development).toHaveBeenCalledWith(false);
+    expect(runtime.exec).not.toHaveBeenCalled();
+  });
+
+  it('prepares Dev components before elevation and reuses an already installed authorization', async () => {
+    runtime.app.isPackaged = false;
+    runtime.development.mockResolvedValue({
+      binary: path.join(customResources, 'dev-host.exe'),
+      addon: path.join(customResources, 'dev-host.node'),
+    });
+    await configureWindowsDesktopSupport(true);
+    expect(runtime.development).toHaveBeenNthCalledWith(1, true);
+    expect(runtime.exec.mock.calls.map((call) => call[1])).toEqual([['--status']]);
+  });
+
+  it('requests administrator approval when the prepared Dev service needs installation or update', async () => {
+    runtime.app.isPackaged = false;
+    runtime.development.mockResolvedValue({
+      binary: path.join(customResources, 'dev-host.exe'),
+      addon: path.join(customResources, 'dev-host.node'),
+    });
+    runtime.exec.mockResolvedValueOnce({ stdout: 'updateRequired\n' });
+    await configureWindowsDesktopSupport(true);
+    expect(runtime.exec.mock.calls.map((call) => call[1])).toEqual([
+      ['--status'],
+      ['--elevate-install', String(process.pid)],
+      ['--status'],
+    ]);
+  });
+});

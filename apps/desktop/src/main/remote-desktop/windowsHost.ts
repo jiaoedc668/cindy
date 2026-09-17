@@ -5,20 +5,45 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WindowsDesktopSupport } from '../../shared/remoteDesktop';
+import { createWindowsDevelopmentAssets, type WindowsDesktopAssets } from './windowsDevelopment';
 
 const exec = promisify(execFile);
 const requireNative = createRequire(import.meta.url);
-const binary = () =>
-  path.join(process.resourcesPath, 'tools', 'remote-desktop', 'cindy-windows-desktop-host.exe');
+let development: ReturnType<typeof createWindowsDevelopmentAssets> | null = null;
+async function assets(prepare = false): Promise<WindowsDesktopAssets | null> {
+  if (app.isPackaged)
+    return {
+      binary: path.join(
+        process.resourcesPath,
+        'tools',
+        'remote-desktop',
+        'cindy-windows-desktop-host.exe',
+      ),
+      addon: path.join(
+        process.resourcesPath,
+        'tools',
+        'remote-desktop',
+        'cindy-windows-desktop-host.node',
+      ),
+    };
+  development ??= createWindowsDevelopmentAssets({
+    application: app.getAppPath(),
+    executable: process.execPath,
+    userData: app.getPath('userData'),
+    arch: process.arch,
+  });
+  return development.resolve(prepare);
+}
 export interface WindowsDesktopConnection {
   request(line: string): Promise<string>;
   close(): void;
 }
 export async function readWindowsDesktopSupport(): Promise<WindowsDesktopSupport | undefined> {
   if (process.platform !== 'win32') return undefined;
-  if (!app.isPackaged) return 'installRequired';
   try {
-    const { stdout } = await exec(binary(), ['--status'], {
+    const native = await assets();
+    if (!native) return 'missing';
+    const { stdout } = await exec(native.binary, ['--status'], {
       timeout: REMOTE_DESKTOP_OFFER_BUDGET.platformStatusMs,
       maxBuffer: 1024,
       windowsHide: true,
@@ -32,7 +57,10 @@ export async function readWindowsDesktopSupport(): Promise<WindowsDesktopSupport
         return 'missing';
       }
     }
-    return status === 'ready' || status === 'missing' || status === 'installRequired'
+    return status === 'ready' ||
+      status === 'missing' ||
+      status === 'installRequired' ||
+      status === 'updateRequired'
       ? status
       : 'unavailable';
   } catch {
@@ -40,10 +68,19 @@ export async function readWindowsDesktopSupport(): Promise<WindowsDesktopSupport
   }
 }
 export async function configureWindowsDesktopSupport(enabled: boolean): Promise<void> {
-  if (process.platform !== 'win32' || !app.isPackaged)
-    throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
+  if (process.platform !== 'win32') throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
+  let native: WindowsDesktopAssets | null;
+  try {
+    native = await assets(true);
+  } catch (error) {
+    if (!app.isPackaged) throw new Error('DESKTOP_NATIVE_BUILD_FAILED');
+    throw error;
+  }
+  if (!native) throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
+  // Recreating a Dev cache does not revoke the installed grant.
+  if (enabled && !app.isPackaged && (await readWindowsDesktopSupport()) === 'ready') return;
   await exec(
-    binary(),
+    native.binary,
     enabled ? ['--elevate-install', String(process.pid)] : ['--elevate-uninstall'],
     { timeout: 130_000, maxBuffer: 1024, windowsHide: true },
   );
@@ -51,16 +88,17 @@ export async function configureWindowsDesktopSupport(enabled: boolean): Promise<
     throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
 }
 export async function openWindowsDesktopConnection(
-  init: { mode: 'input' | 'probe' } | { mode: 'capture'; rect: number[]; cursorOverlay?: boolean; bitrate?: number },
+  init:
+    | { mode: 'input' | 'probe' }
+    | { mode: 'capture'; rect: number[]; cursorOverlay?: boolean; bitrate?: number },
 ): Promise<WindowsDesktopConnection> {
-  if (process.platform !== 'win32' || !app.isPackaged)
-    throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
-  // Fixed packaged Node-API addon, loaded only by Main. It opens the pipe in
+  if (process.platform !== 'win32') throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
+  const prepared = await assets();
+  if (!prepared) throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
+  // Fixed native addon (checkout-bound in Dev), loaded only by Main. It opens the pipe in
   // this process and authenticates SCM/SYSTEM identity before sending anything.
-  const native = requireNative(
-    path.join(process.resourcesPath, 'tools', 'remote-desktop', 'cindy-windows-desktop-host.node'),
-  ) as {
+  const native = requireNative(prepared.addon) as {
     DesktopConnection: { open(binary: string, init: string): Promise<WindowsDesktopConnection> };
   };
-  return native.DesktopConnection.open(binary(), JSON.stringify(init));
+  return native.DesktopConnection.open(prepared.binary, JSON.stringify(init));
 }

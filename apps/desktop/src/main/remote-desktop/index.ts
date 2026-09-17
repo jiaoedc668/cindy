@@ -1,4 +1,5 @@
 import {
+  app,
   desktopCapturer,
   ipcMain,
   nativeImage,
@@ -545,7 +546,10 @@ export function registerRemoteDesktopIpc(
       active: remoteDesktop.state,
       permissionGuide: permissions.guideOpen,
       ...(checkWindowsSupport === true
-        ? { windowsSupport: await readWindowsDesktopSupport() }
+        ? {
+            windowsSupport: await readWindowsDesktopSupport(),
+            windowsDevelopment: process.platform === 'win32' && !app.isPackaged,
+          }
         : {}),
     };
   });
@@ -560,7 +564,9 @@ export function registerRemoteDesktopIpc(
     remoteDesktop.stop();
     try {
       await configureWindowsDesktopSupport(enabled);
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === 'DESKTOP_NATIVE_BUILD_FAILED')
+        throwIpcError('PRECONDITION_FAILED', 'Windows desktop native preparation failed');
       throwIpcError('PERMISSION_DENIED', 'Windows desktop support setup failed');
     } finally {
       windowsSetupBusy = false;

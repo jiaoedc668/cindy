@@ -64,3 +64,96 @@ it('recovers a slow initial probe discarded by an intervening enable action', as
   expect(state).toHaveBeenLastCalledWith(true);
   expect(screen.getByRole('button', { name: 'remoteDesktop.windowsEnable' })).toBeTruthy();
 });
+
+it('keeps ordinary remote desktop enabled when administrator authorization is cancelled', async () => {
+  const state = vi.fn(async () => ({ enabled: true, active: null, windowsSupport: 'missing' }));
+  const windowsSupport = vi.fn().mockRejectedValue(new Error('UAC cancelled'));
+  const enable = vi.fn();
+  Object.assign(window, { electronAPI: { remoteDesktop: { state, windowsSupport, enable } } });
+  render(<RemoteDesktopSetting />);
+  await act(async () => {});
+  fireEvent.click(screen.getByRole('button', { name: 'remoteDesktop.windowsEnable' }));
+  await act(async () => {});
+  expect(windowsSupport).toHaveBeenCalledExactlyOnceWith(true);
+  expect(enable).not.toHaveBeenCalled();
+  expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('true');
+  expect(screen.getByRole('alert').textContent).toBe('remoteDesktop.windowsError');
+  expect(
+    screen.getByRole('button', { name: 'remoteDesktop.windowsEnable' }).hasAttribute('disabled'),
+  ).toBe(false);
+});
+
+it('uses the installed authorization after remount without requesting administrator approval again', async () => {
+  let support = 'ready';
+  const state = vi.fn(async () => ({ enabled: true, active: null, windowsSupport: support }));
+  const windowsSupport = vi.fn(async (enabled: boolean) => {
+    support = enabled ? 'ready' : 'missing';
+  });
+  Object.assign(window, { electronAPI: { remoteDesktop: { state, windowsSupport } } });
+  const first = render(<RemoteDesktopSetting />);
+  await act(async () => {});
+  first.unmount();
+  render(<RemoteDesktopSetting />);
+  await act(async () => {});
+  expect(windowsSupport).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'remoteDesktop.windowsDisable' }));
+  await act(async () => {});
+  expect(windowsSupport).toHaveBeenCalledExactlyOnceWith(false);
+  expect(screen.getByRole('button', { name: 'remoteDesktop.windowsEnable' })).toBeTruthy();
+});
+
+it('lets Dev prepare and authorize the service while keeping the trust scope visible', async () => {
+  let support = 'missing';
+  let finish!: () => void;
+  const state = vi.fn(async () => ({
+    enabled: true,
+    active: null,
+    windowsSupport: support,
+    windowsDevelopment: true,
+  }));
+  const windowsSupport = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = () => {
+          support = 'ready';
+          resolve();
+        };
+      }),
+  );
+  Object.assign(window, { electronAPI: { remoteDesktop: { state, windowsSupport } } });
+  render(<RemoteDesktopSetting />);
+  await act(async () => {});
+  expect(screen.getByText('remoteDesktop.windowsDevelopmentHint')).toBeTruthy();
+  expect(screen.getByText('remoteDesktop.windowsDevelopmentMissing')).toBeTruthy();
+  const enable = screen.getByRole('button', { name: 'remoteDesktop.windowsEnable' });
+  expect(enable.hasAttribute('disabled')).toBe(false);
+  fireEvent.click(enable);
+  expect(
+    screen.getByRole('button', { name: 'remoteDesktop.windowsSettingUp' }).hasAttribute('disabled'),
+  ).toBe(true);
+  await act(async () => {
+    finish();
+  });
+  expect(windowsSupport).toHaveBeenCalledExactlyOnceWith(true);
+  expect(screen.getByRole('button', { name: 'remoteDesktop.windowsDisable' })).toBeTruthy();
+});
+
+it('explains a Dev build failure separately from cancelled administrator approval', async () => {
+  const state = vi.fn(async () => ({
+    enabled: true,
+    active: null,
+    windowsSupport: 'missing',
+    windowsDevelopment: true,
+  }));
+  const windowsSupport = vi
+    .fn()
+    .mockRejectedValue(
+      new Error('[PRECONDITION_FAILED] Windows desktop native preparation failed'),
+    );
+  Object.assign(window, { electronAPI: { remoteDesktop: { state, windowsSupport } } });
+  render(<RemoteDesktopSetting />);
+  await act(async () => {});
+  fireEvent.click(screen.getByRole('button', { name: 'remoteDesktop.windowsEnable' }));
+  await act(async () => {});
+  expect(screen.getByRole('alert').textContent).toBe('remoteDesktop.windowsPreparationError');
+});

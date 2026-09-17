@@ -33,6 +33,7 @@ describe('remote desktop state polling', () => {
   it('does not probe Windows for routine polls, but checks fresh status on explicit requests', async () => {
     const readWindowsDesktopSupport = vi.fn(async () => 'ready');
     const assertTrustedAppRendererEvent = vi.fn();
+    const app = { isPackaged: false };
     let handler: (event: unknown, check?: unknown) => Promise<Record<string, unknown>>;
     compile(between(source, '  ipcMain.handle(DESKTOP_LOCAL.STATE', '  let windowsSetupBusy'), {
       ipcMain: {
@@ -41,6 +42,8 @@ describe('remote desktop state polling', () => {
         },
       },
       DESKTOP_LOCAL: { STATE: 'state' },
+      app,
+      process: { platform: 'win32' },
       assertTrustedAppRendererEvent,
       readDeviceLinkSettings: () => ({ remoteDesktopEnabled: false }),
       remoteDesktop: { state: null },
@@ -54,9 +57,16 @@ describe('remote desktop state polling', () => {
       expect(await handler!({}, poll % 2 ? false : undefined)).not.toHaveProperty('windowsSupport');
     }
     expect(readWindowsDesktopSupport).not.toHaveBeenCalled();
-    expect(await handler!({}, true)).toHaveProperty('windowsSupport', 'ready');
+    expect(await handler!({}, true)).toMatchObject({
+      windowsSupport: 'ready',
+      windowsDevelopment: true,
+    });
     readWindowsDesktopSupport.mockResolvedValue('missing');
-    expect(await handler!({}, true)).toHaveProperty('windowsSupport', 'missing');
+    app.isPackaged = true;
+    expect(await handler!({}, true)).toMatchObject({
+      windowsSupport: 'missing',
+      windowsDevelopment: false,
+    });
     expect(readWindowsDesktopSupport).toHaveBeenCalledTimes(2);
     await expect(handler!({}, 'true')).rejects.toThrow('INVALID_PARAMS');
     expect(readWindowsDesktopSupport).toHaveBeenCalledTimes(2);

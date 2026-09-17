@@ -4,11 +4,13 @@ import type { WindowsDesktopSupport } from '../../../shared/remoteDesktop';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { RemoteDesktopPermissions } from './RemoteDesktopPermissions';
+import { extractIpcError } from '@/utils/ipcError';
 
 export function RemoteDesktopSetting() {
   const { t } = useTranslation();
   const [windowsSupport, setWindowsSupport] = useState<WindowsDesktopSupport>();
-  const [serviceError, setServiceError] = useState(false);
+  const [serviceError, setServiceError] = useState<'prepare' | 'setup' | null>(null);
+  const [windowsDevelopment, setWindowsDevelopment] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
@@ -29,6 +31,7 @@ export function RemoteDesktopSetting() {
           if (active && current === revision.current) {
             setEnabled(state.enabled);
             setWindowsSupport(state.windowsSupport);
+            setWindowsDevelopment(state.windowsDevelopment === true);
           }
         })
         .catch(() => {
@@ -90,11 +93,24 @@ export function RemoteDesktopSetting() {
               {t('remoteDesktop.windowsTitle')}
             </p>
             <p className="text-12 text-[var(--text-tertiary)]">
-              {t(`remoteDesktop.windows${windowsSupport}`)}
+              {t(
+                windowsDevelopment && windowsSupport === 'missing'
+                  ? 'remoteDesktop.windowsDevelopmentMissing'
+                  : `remoteDesktop.windows${windowsSupport}`,
+              )}
             </p>
+            {windowsDevelopment && (
+              <p className="text-12 text-[var(--text-tertiary)]">
+                {t('remoteDesktop.windowsDevelopmentHint')}
+              </p>
+            )}
             {serviceError && (
               <p role="alert" className="text-12 text-[var(--text-primary)]">
-                {t('remoteDesktop.windowsError')}
+                {t(
+                  serviceError === 'prepare'
+                    ? 'remoteDesktop.windowsPreparationError'
+                    : 'remoteDesktop.windowsError',
+                )}
               </p>
             )}
           </div>
@@ -106,12 +122,16 @@ export function RemoteDesktopSetting() {
               revision.current++;
               changing.current = true;
               setBusy(true);
-              setServiceError(false);
+              setServiceError(null);
               void window.electronAPI.remoteDesktop
                 .windowsSupport(windowsSupport !== 'ready')
                 .then(() => window.electronAPI.remoteDesktop.state(true))
                 .then((state) => setWindowsSupport(state.windowsSupport))
-                .catch(() => setServiceError(true))
+                .catch((error) =>
+                  setServiceError(
+                    extractIpcError(error)?.code === 'PRECONDITION_FAILED' ? 'prepare' : 'setup',
+                  ),
+                )
                 .finally(() => {
                   changing.current = false;
                   setBusy(false);
@@ -119,9 +139,13 @@ export function RemoteDesktopSetting() {
             }}
           >
             {t(
-              windowsSupport === 'ready'
-                ? 'remoteDesktop.windowsDisable'
-                : 'remoteDesktop.windowsEnable',
+              busy
+                ? 'remoteDesktop.windowsSettingUp'
+                : windowsSupport === 'ready'
+                  ? 'remoteDesktop.windowsDisable'
+                  : windowsSupport === 'updateRequired'
+                    ? 'remoteDesktop.windowsUpdate'
+                    : 'remoteDesktop.windowsEnable',
             )}
           </Button>
         </div>

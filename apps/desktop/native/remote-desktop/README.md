@@ -22,6 +22,31 @@ binding, rechecking and restoration. Run the Windows crate's `cargo test` with a
 task-specific `--target-dir` outside the checkout. It is separate from Node unit
 tests and does not prove lock/UAC or physical cross-device behavior.
 
+## Windows service installation and authorization
+
+The packaged settings action installs a separate protected host/input pair, keeps
+the application's custom location, and persists the approved installation and
+Windows user rather than a process ID. Application code is protected in place
+after UAC; unrelated data and parent directories keep their permissions.
+Source Dev instead compiles a checkout/runtime-bound variant on explicit setup.
+It trusts the approved development code and leaves source/node_modules editable;
+no runtime flag enables this policy in packaged helpers. Native updates keep the
+same checkout-scoped service name and require an explicit administrator update.
+The full contract and remaining installed-service validation are documented in
+[`docs/remote-desktop.md`](../../../../docs/remote-desktop.md#windows-system-service-implementation-awaiting-windows-runtime-validation).
+
+Run native behavior checks without installing a service or prompting for UAC:
+
+```text
+cargo test --locked --manifest-path apps/desktop/native/remote-desktop/windows-host/Cargo.toml --bin cindy-windows-desktop-host --target-dir <unique-temporary-directory> -- --test-threads=1
+```
+
+The file-lock regression uses real Windows handles: metadata-only opens do not
+enforce sharing restrictions. Code pins request read-data/list-directory access
+and reject outstanding writers, so changing an ACL cannot leave an old writer
+able to modify approved code. The directory-permission test also verifies that
+the exact-object ACL setter does not propagate into unrelated child data.
+
 ## macOS input helper trust boundary
 
 The input helper authenticates its caller before inspecting any command or

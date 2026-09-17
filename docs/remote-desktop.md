@@ -490,21 +490,64 @@ affects only this desktop lease/video track, not other connected peers.
 
 Packaged Windows builds include a native SCM service, a Main-only Node-API pipe
 transport, a session-scoped SYSTEM GDI capture worker and the SendInput helper.
-The settings page installs/removes the service through Windows administrator
-consent. Only a protected all-users Program Files installation is eligible;
-per-user/development installations retain the ordinary desktop path.
+The existing Windows **Lock screen control** setting installs/removes the service
+through native Windows administrator consent. Setup copies only the host/input
+executables into an administrator-owned `Program Files/CindyRemoteDesktop/<installation>`
+directory. The application can remain in its chosen per-user or custom location.
+The service name retains the installation-scoped legacy identity, so setup replaces
+the old on-demand service rather than leaving two brokers behind.
 
-Authorization records a live process handle for the Cindy process explicitly
-approved through the elevated setup helper. Executable path alone is insufficient:
-plugin utility processes share Cindy.exe. The service starts on demand and exits when its approved Cindy process exits.
-Restarting Cindy or the service requires fresh administrator approval. This is a current limitation, not unattended
-post-reboot support. No authorization secrets or screenshots are persisted.
+Setup also protects the packaged application's code in place: its root and code
+directories, executable/DLL/V8 snapshot files, ASAR and unpacked native dependencies.
+It does not move the app or change parent-directory, userData, or workspace permissions.
+Protected code subsequently requires administrator rights to replace, including
+updates; the existing installer already handles protected-directory authorization.
+The opt-in text discloses both service installation and program-file protection.
+Cancelling UAC runs neither step and does not disable ordinary remote desktop.
+
+Authorization persists the application location, executable name and approved
+Windows user SID in the protected service directory. It contains no password,
+bearer token or PID. Each new Main connection is checked against that record,
+the active console session and protected application files. Executable path alone
+is insufficient: the native transport supplies the actual pipe client PID and
+the service rejects utility/renderer and debugging command lines. These checks
+do not make same-user arbitrary native process injection a sandbox boundary.
+The service is configured for automatic startup and remains running when Cindy
+exits. Restarting Cindy or the service does not require renewed administrator consent.
+The relay/authenticated remote connection still belongs to Cindy Main: this is
+not pre-login or unattended post-reboot remote access.
+
+Source development uses a separate compile-time `development` variant of the same
+fixed-purpose broker. Its checkout and Electron executable are bound during
+compilation; environment variables or command-line switches cannot enable this
+mode in a packaged broker. Its service identity is stable for that checkout and
+distinct from packaged installations. Version-2 development authorization records
+cannot be loaded by the version-1 packaged authorization path.
+
+The existing setting prepares Dev components only after the user clicks setup,
+then requests native UAC. Polling never compiles or elevates. Generated binaries
+are cached under userData by native source/runtime fingerprint, so a loaded Node
+addon is not overwritten. Normal source edits and Dev restarts reuse the grant;
+changed native service binaries show an update action requiring administrator
+approval. The broker checks the approved Windows user and exact bound Electron
+image. An `electron .` entry is resolved against the process's actual working
+directory; utility/renderer processes and other app directories do not inherit it.
+
+Dev deliberately trusts code in the approved developer runtime, including mutable
+source and its debugger. It does not seal or alter checkout/node_modules
+permissions and is not isolation against code already running in that runtime.
+This scope is visible beside the setting. Only the copied SYSTEM host/input pair
+and its approval record receive administrator-only protection.
 
 The broker validates file/directory ownership, writable ACLs, reparse points,
-SCM identity, peer PIDs and active console session. It retains installation
-handles for its lifetime. Workers are fixed-purpose children in kill-on-close jobs
+SCM identity, peer PIDs and active console session. It pins the service installation
+for its lifetime and approved packaged application code while each Main process is alive.
+Workers are fixed-purpose children in kill-on-close jobs
 with local-only, bounded, timed pipes. Uninstall/upgrade waits for the service to
-stop before removing binaries. Upgrade clears the authorization.
+stop and its process to exit before removing binaries. Removal deletes only the
+fixed service payload and authorization files, never the user's application directory.
+The existing application uninstall/upgrade hook removes the service; a subsequent
+application upgrade therefore still requires enabling lock screen control again.
 
 Desktop transitions terminate the old input helper, including pending batches
 and long text input; Main then recovers only the remote desktop lease. Ctrl+Alt+Del
@@ -513,10 +556,16 @@ Windows policy decides whether software SAS is allowed; Cindy never changes it.
 Capture follows the input desktop and validates the selected monitor's geometry.
 The GDI compatibility stream is capped at a 1280-pixel long edge and 180 KB JPEG.
 
-Validation available on macOS: Windows-target Rust compilation checks and Desktop
-TypeScript checking. Still required on Windows 10/11: signed package linking and
-installation, administrator consent/cancellation, lock/unlock, UAC, policy-enabled
-SAS, mixed-DPI displays, worker cleanup, upgrade/uninstall, and plugin rejection.
+Windows native compilation and tests cover persisted installation identity, Main
+versus utility/debug launch arguments, real process/token queries, query-only
+endpoint permissions, reparse rejection, effective no-write/no-delete file pins,
+and preservation of unrelated data-directory permissions. Desktop adapter/settings
+tests cover explicit setup, cancelled authorization, restored readiness and removal.
+These do not replace installed-service testing. Still required on Windows 10/11:
+signed package installation, real administrator consent/cancellation (including
+another administrator account), ordinary Main-to-SYSTEM connection, app/service
+restart, lock/unlock, UAC, policy-enabled SAS, mixed-DPI displays, worker cleanup,
+upgrade/uninstall, and plugin rejection in the packaged runtime.
 Windows display-mode changes and pre-login/unattended post-reboot control are not
 implemented. Linux remains deferred. Do not present this as fully validated
 Windows support or advertise high-frame-rate secure capture.
