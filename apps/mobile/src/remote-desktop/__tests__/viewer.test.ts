@@ -258,6 +258,22 @@ describe("native media overlay", () => {
     expect(v.messages.some((m) => m.type === "iceConfig")).toBe(false);
   });
 
+  it("shares backdrop fit policy across native video and orientation changes", () => {
+    const v = viewer(false, true, true);
+    v.send({ type: "init", epoch: "native", width: 1920, height: 1080 });
+    const viewport = () =>
+      v.messages.findLast((m) => m.type === "nativeViewport");
+    expect(viewport()).toMatchObject({ fillHeight: false });
+    v.send({ type: "nativeVideo", epoch: "native", active: true });
+    v.send({ type: "viewport", fillHeight: true });
+    expect(viewport()).toMatchObject({ fillHeight: true });
+    v.send({ type: "fit" });
+    expect(viewport()).toMatchObject({ fillHeight: true });
+    expect(v.elements.bg.style.display).toBe("none");
+    v.send({ type: "viewport", fillHeight: false });
+    expect(viewport()).toMatchObject({ fillHeight: false });
+  });
+
   it("keeps browser pixels out of native video and restores JPEG after stop/reconnect", () => {
     const v = viewer(false, true, true);
     v.send({ type: "init", epoch: "first", width: 1920, height: 1080 });

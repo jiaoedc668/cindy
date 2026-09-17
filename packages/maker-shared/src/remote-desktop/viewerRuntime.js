@@ -619,6 +619,7 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
     if (config.nativeMedia && epoch)
       post({
         type: "nativeViewport",
+        fillHeight,
         x: r.x,
         y: r.y,
         width: r.width,

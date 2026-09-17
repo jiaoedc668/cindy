@@ -1,6 +1,7 @@
 import ExpoModulesCore
 import AVKit
 import WebRTC
+import CoreImage
 
 /// Native media surface beneath the existing HTML input overlay. HTML supplies
 /// its exact fitted/zoomed rectangle; pixels never cross the React bridge.
@@ -8,6 +9,11 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
   AVPictureInPictureSampleBufferPlaybackDelegate {
   let onMessage = EventDispatcher()
   private let display = AVSampleBufferDisplayLayer()
+  private let backdrop = CALayer()
+  private let backdropContext = CIContext(options: [.cacheIntermediates: false])
+  private var backdropActive = false
+  private var backdropFillHeight = false
+  private var backdropTime: CFTimeInterval = 0
   private var pip: AVPictureInPictureController?
   private var receiver: RemoteDesktopReceiver?
   private var configuration: [String: Any]?
@@ -16,7 +22,10 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
   private var retries = 0
   private var presenting = false
   var inlineVisible = true {
-    didSet { updateInlineVisibility() }
+    didSet {
+      updateInlineVisibility()
+      if inlineVisible && !oldValue { refreshBackdrop() }
+    }
   }
   private func updateInlineVisibility() {
     // Keep the source ready until PiP has actually started. Once detached,
@@ -42,6 +51,8 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     clipsToBounds = true
     isUserInteractionEnabled = false
     display.videoGravity = .resizeAspect
+    backdrop.opacity = 0.72
+    layer.addSublayer(backdrop)
     layer.addSublayer(display)
     if AVPictureInPictureController.isPictureInPictureSupported() {
       pip = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: display, playbackDelegate: self))
@@ -77,6 +88,7 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
         self.emit(["type": "presentation", "epoch": epoch, "active": self.presenting])
       }
       self.reportCapability()
+      self.refreshBackdrop()
     }
   }
   deinit {
@@ -121,6 +133,11 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
       CATransaction.begin()
       CATransaction.setDisableActions(true)
       display.frame = CGRect(x: x, y: y, width: width, height: height)
+      let fill = message["fillHeight"] as? Bool == true
+      if fill != backdropFillHeight {
+        backdropFillHeight = fill
+        refreshBackdrop()
+      }
       CATransaction.commit()
     case "presentation":
       if message["enabled"] as? Bool == true {
@@ -157,7 +174,7 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     current.isPresenting = { [weak self] in self?.presenting == true && self?.pip?.isPictureInPictureActive == true }
     current.onFrame = { [weak self, weak current] frame in
       guard let self, let current, self.receiver === current else { return false }
-      guard self.render(frame) else { return false }
+      guard self.render(frame, liveFrame: true) else { return false }
       self.latestFrame = frame
       self.reportCapability()
       return true
@@ -177,6 +194,9 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
         self.stableTimer = nil
       }
       if event["type"] as? String == "fallback" {
+        self.backdropActive = false
+        self.backdrop.contents = nil
+        self.backdropTime = 0
         self.wantsPresentation = false
         self.presenting = false
         self.pip?.stopPictureInPicture()
@@ -237,10 +257,13 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     configuration = nil
     pip?.stopPictureInPicture()
     display.flushAndRemoveImage()
+    backdropActive = false
+    backdrop.contents = nil
+    backdropTime = 0
     latestFrame = nil
     pool = nil
   }
-  @discardableResult private func render(_ frame: RTCVideoFrame) -> Bool {
+  @discardableResult private func render(_ frame: RTCVideoFrame, liveFrame: Bool = false) -> Bool {
     guard let buffer = pixelBuffer(frame) else { return false }
     var format: CMVideoFormatDescription?
     guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: buffer, formatDescriptionOut: &format) == noErr,
@@ -258,8 +281,43 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     if display.status == .failed { display.flush() }
     guard display.isReadyForMoreMediaData else { return false }
     display.enqueue(sample)
+    // Replaying the last main frame after fallback must not revive its backdrop.
+    if liveFrame { backdropActive = true }
+    renderBackdrop(buffer)
     return true
   }
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    // Match the HTML ambient canvas overscan without moving the main picture.
+    backdrop.frame = bounds.insetBy(dx: -bounds.width * 0.06, dy: -bounds.height * 0.06)
+    CATransaction.commit()
+    refreshBackdrop()
+  }
+
+  private func refreshBackdrop() {
+    guard backdropActive, inlineVisible, UIApplication.shared.applicationState == .active,
+          let latestFrame, let buffer = pixelBuffer(latestFrame) else { return }
+    backdropTime = 0
+    renderBackdrop(buffer)
+  }
+
+  private func renderBackdrop(_ buffer: CVPixelBuffer) {
+    guard backdropActive, inlineVisible, UIApplication.shared.applicationState == .active,
+          bounds.width > 0, bounds.height > 0 else { return }
+    let now = CACurrentMediaTime()
+    // A blurred ambient image needs neither full desktop resolution nor 60 fps.
+    guard now - backdropTime >= 1.0 / 15 else { return }
+    backdropTime = now
+    let image = RemoteDesktopBackdrop.image(source: CIImage(cvPixelBuffer: buffer),
+      size: bounds.size, fillHeight: backdropFillHeight, context: backdropContext)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    backdrop.contents = image
+    CATransaction.commit()
+  }
+
   private func pixelBuffer(_ frame: RTCVideoFrame) -> CVPixelBuffer? {
     if let native = frame.buffer as? RTCCVPixelBuffer,
        native.width == CVPixelBufferGetWidth(native.pixelBuffer),
