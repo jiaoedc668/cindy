@@ -9263,7 +9263,7 @@ app.on('ready', async () => {
 //   - process.on('uncaughtException')—— main 进程未捕获异常
 //   - app.on('render-process-gone')  —— renderer 崩 (main 还活)
 //
-// 三个阶段串成 sync → async(并发+6s 超时, 见下方 installQuitHandler) → post-async,
+// 三个阶段串成 sync → async(并发+16s 超时, 见下方 installQuitHandler) → post-async,
 // 然后 app.exit(<code>)。
 // 散落的 fire-and-forget 已经收掉, 进程不会在 disposer 跑完之前死。
 // 真硬崩 (segfault / kill -9) JS 层无能为力, 子进程靠 stdin EOF 自死。
@@ -9654,7 +9654,10 @@ onQuit('ios-simulator-ownership-registry', flushIOSSimulatorOwnershipRegistry, '
 onQuit('db-client', () => lifecycleDbClientManager.dispose('quit'), 'post-async');
 onQuit('local-db-close', () => localDbCloseDb(), 'post-async');
 
-installQuitHandler(6000);
+// A display restore may join an in-flight native mode write (5s), restore the
+// original mode (5s), then await Electron geometry (5s). Keep a margin before
+// the existing 20s hard-exit watchdog; completed disposers never wait this long.
+installQuitHandler(16000);
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

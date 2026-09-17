@@ -437,12 +437,24 @@ export async function setDesktopDisplayMode(
   displayId: string,
   modeId: string,
   beforeChange: () => void,
+  restoringOriginal = false,
 ): Promise<void> {
   if (changingResolution) throw new Error('DESKTOP_DISPLAY_BUSY');
   changingResolution = true;
   try {
-    const modes = await readDesktopDisplayModes(displayId);
-    if (!modes.some((mode) => mode.id === modeId)) throw new Error('DESKTOP_DISPLAY_MODE_MISSING');
+    if (
+      process.platform !== 'darwin' ||
+      !/^[0-9]{1,10}$/.test(displayId) ||
+      !/^[0-9]{1,10}$/.test(modeId)
+    )
+      throw new Error('DESKTOP_DISPLAY_MODE_MISSING');
+    // The UI list deduplicates equal-size modes; the saved original may no
+    // longer be its preferred entry. Native still validates against ALL modes.
+    if (!restoringOriginal) {
+      const modes = await readDesktopDisplayModes(displayId);
+      if (!modes.some((mode) => mode.id === modeId))
+        throw new Error('DESKTOP_DISPLAY_MODE_MISSING');
+    }
     const binary = await resolveBinary();
     // Build/enumeration can finish after disconnect, revocation or view-only.
     beforeChange();
