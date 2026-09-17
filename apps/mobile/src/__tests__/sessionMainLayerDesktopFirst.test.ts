@@ -44,7 +44,13 @@ describe('mobile session main layer desktop-first noise budget', () => {
 
     // banner 渲染条件(useShowConnectionBanner):请求级 / transport hold error、可分类连接问题、
     // 目标设备熔断 open(电脑端未响应)立即显示;普通弱网断线经防闪窗口后也显示,不再彻底静默。
-    expect(routeSource).toContain('{showConnectionBanner || showCachedHistoryNotice ? (');
+    // Confirmed shared-task revocation has its own state, not a retry banner.
+    expect(routeSource).toContain('{!isSharedTaskAccessRevoked && (showConnectionBanner || showCachedHistoryNotice) ? (');
+    const revokedStart = source.indexOf('{isSharedTaskAccessRevoked ? (');
+    expect(revokedStart).toBeGreaterThan(-1);
+    const revokedEnd = source.indexOf("sessionOperationLayout.composerSlot === 'missing-session'", revokedStart);
+    expect(revokedEnd).toBeGreaterThan(revokedStart);
+    expect(source.slice(revokedStart, revokedEnd)).toContain("t('sessionMeeting.notJoined')");
     expect(routeSource).toContain('cachedOnly={showCachedHistoryNotice}');
     expect(source.replace(/\r\n/g, '\n'))
       .toContain('useShowConnectionBanner(\n    status,\n    bannerError,');

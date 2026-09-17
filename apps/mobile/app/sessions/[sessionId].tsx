@@ -85,6 +85,7 @@ import { resolveEffectiveConnectionError } from '@/components/connectionBannerVi
 import { PaperPlaneIcon } from '@/components/PaperPlaneIcon';
 import { useDeviceLink } from '@/device-link/DeviceLinkContext';
 import { useRevokedDevices } from '@/device-link/revokedDevicesStore';
+import { useSessionMeetingAccess } from '@/device-link/useSessionMeetingAccess';
 import { useUnresponsiveDevices } from '@/device-link/unresponsiveDevicesStore';
 import {
   connectionRecoverySyncRetryDelayMs,
@@ -2043,6 +2044,7 @@ export default function SessionScreen() {
     setCodexResetRetryKey(null);
   }
   const isDeviceAccessRevoked = !!deviceId && revokedDevices.has(deviceId);
+  const isSharedTaskAccessRevoked = isDeviceAccessRevoked && isMeetingPeer(deviceId);
   // 熔断 open:被控电脑「进程活着但不回包」的半死态;relay status 恒 online,必须单独入参。
   const isDeviceUnresponsive = !!deviceId && unresponsiveDevices.has(deviceId);
   // 熔断已关后残留的 DEVICE_UNRESPONSIVE 错误按陈旧丢弃,且必须一次性解析、
@@ -2198,6 +2200,7 @@ export default function SessionScreen() {
   // 回执。把 AppState 作为回执 effect 的重算信号:离开 active 立刻取消未到期的
   // 计时,回到 active 重新起满一轮 dwell。
   const [appStateActive, setAppStateActive] = useState(AppState.currentState === 'active');
+  useSessionMeetingAccess(deviceId, sessionId, appStateActive);
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
       setAppStateActive(nextState === 'active');
@@ -8981,7 +8984,7 @@ export default function SessionScreen() {
                   || (connectionError ? t('session.screen.sessionNotSynced') : (deviceName || t('session.screen.conversationFallback')))}
             />
 
-            {showConnectionBanner || showCachedHistoryNotice ? (
+            {!isSharedTaskAccessRevoked && (showConnectionBanner || showCachedHistoryNotice) ? (
               <ConnectionBanner
                 density="compact"
                 cachedOnly={showCachedHistoryNotice}
@@ -9312,7 +9315,13 @@ export default function SessionScreen() {
         ) : null}
         {composerAnnotations.host}
         <View style={styles.sessionMainLayer} testID="session.mainLayer">
-          {sessionOperationLayout.composerSlot === 'missing-session' && remoteUnavailableReason ? (
+          {isSharedTaskAccessRevoked ? (
+            <View style={[styles.sessionSyncPlaceholder, { paddingTop: topOverlayHeight + spacing.lg }]} testID="session.sharedAccessRevoked">
+              <View style={styles.sessionSyncRow}>
+                <Text style={styles.sessionSyncTitle}>{t('sessionMeeting.notJoined')}</Text>
+              </View>
+            </View>
+          ) : sessionOperationLayout.composerSlot === 'missing-session' && remoteUnavailableReason ? (
             // 会话行尚未到达时保留状态占位；自动恢复类错误不再提供手动同步入口。
             <SessionSyncPlaceholder
               loading={loading}
