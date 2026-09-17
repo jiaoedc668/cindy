@@ -98,11 +98,12 @@ describe('Dev Windows desktop components', () => {
     const original = await fs.readFile(source);
     try {
       await fs.writeFile(source, 'updated-fake-native-source');
-      const updated = createWindowsDevelopmentAssets(runtime);
-      expect(await updated.resolve()).toBeNull();
-      const current = await updated.resolve(true);
+      expect(await service.resolve()).toBeNull();
+      const current = await service.resolve(true);
       expect(current!.addon).not.toBe(previous!.addon);
       expect(await fs.readFile(previous!.addon, 'utf8')).toBe('fake-native-output');
+      const restarted = createWindowsDevelopmentAssets(runtime);
+      expect(await restarted.resolve()).toEqual(current);
     } finally {
       await fs.writeFile(source, original);
     }

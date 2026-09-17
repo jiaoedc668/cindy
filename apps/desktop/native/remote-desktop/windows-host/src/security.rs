@@ -59,10 +59,7 @@ pub fn application_paths(install: &Path) -> Result<Vec<PathBuf>> {
             paths.push(path);
         }
     }
-    for directory in [
-        "resources/app.asar.unpacked",
-        "resources/tools/remote-desktop",
-    ] {
+    for directory in ["resources/app.asar.unpacked", "resources/tools"] {
         let root = install.join(directory);
         if !root.exists() {
             continue;
@@ -84,7 +81,6 @@ pub fn application_paths(install: &Path) -> Result<Vec<PathBuf>> {
             }
         }
     }
-    paths.push(install.join("resources/tools"));
     paths.sort();
     paths.dedup();
     Ok(paths)
@@ -857,6 +853,26 @@ impl AclSnapshot {
     }
 
     pub fn restore_allowed(&self, allowed: impl Fn(&Path) -> bool) -> Result<()> {
+        self.restore_in(None, allowed)
+    }
+
+    pub fn restore_in(&self, root: Option<&Path>, allowed: impl Fn(&Path) -> bool) -> Result<()> {
+        // Pin the application (or each captured path) before canonicalize or
+        // CreateFile. Intermediate junctions are followed by path lookup;
+        // holding ancestors without DELETE stops a parent outside the snapshot
+        // from being replaced between the range check and the ACL write.
+        let mut ancestor_pins = Vec::new();
+        if let Some(root) = root {
+            if root.exists() {
+                ancestor_pins.extend(pin_ancestors(root)?);
+            }
+        } else {
+            for (path, _) in &self.paths {
+                if crate::installation::is_local_application_path(path) && path.exists() {
+                    ancestor_pins.extend(pin_ancestors(path)?);
+                }
+            }
+        }
         // Pin shallowest-first without DELETE sharing while the tree is still
         // the captured one. CreateFile follows intermediate junctions; holding
         // the parent first stops a later swap from retargeting children.
@@ -884,6 +900,7 @@ impl AclSnapshot {
         for (_, handle, descriptor) in &pinned {
             apply_descriptor(handle.0, descriptor)?;
         }
+        drop(ancestor_pins);
         Ok(())
     }
 }
@@ -1571,6 +1588,7 @@ mod tests {
         for directory in [
             "resources/app.asar.unpacked/native",
             "resources/tools/remote-desktop",
+            "resources/tools/windows-taskbar",
             "userData",
             "workspace",
         ] {
@@ -1582,6 +1600,7 @@ mod tests {
             "resources/app.asar",
             "resources/app.asar.unpacked/native/addon.node",
             "resources/tools/remote-desktop/cindy-windows-desktop-host.node",
+            "resources/tools/windows-taskbar/cindy-windows-taskbar.node",
             "userData/preferences.json",
             "workspace/notes.txt",
         ] {
@@ -1593,6 +1612,9 @@ mod tests {
         assert!(paths.contains(&app.join("resources/app.asar.unpacked/native/addon.node")));
         assert!(paths
             .contains(&app.join("resources/tools/remote-desktop/cindy-windows-desktop-host.node")));
+        assert!(
+            paths.contains(&app.join("resources/tools/windows-taskbar/cindy-windows-taskbar.node"))
+        );
         assert!(paths.iter().all(|path| path.starts_with(&app)));
         assert!(!paths
             .iter()

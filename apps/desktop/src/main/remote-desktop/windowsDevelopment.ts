@@ -23,7 +23,7 @@ interface DevelopmentRuntime {
 }
 
 export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
-  let descriptor: Promise<{
+  let describing: Promise<{
     application: string;
     executable: string;
     source: string;
@@ -31,8 +31,10 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
     fingerprint: string;
   }> | null = null;
   let building: Promise<WindowsDesktopAssets> | null = null;
-  const describe = () =>
-    (descriptor ??= (async () => {
+  let buildingFingerprint: string | null = null;
+  const describe = () => {
+    if (describing) return describing;
+    describing = (async () => {
       if (runtime.arch !== 'x64' && runtime.arch !== 'arm64')
         throw new Error('DESKTOP_NATIVE_BUILD_FAILED');
       const application = await fs.realpath(runtime.application);
@@ -72,10 +74,11 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
           fingerprint,
         ),
       };
-    })().catch((error) => {
-      descriptor = null;
-      throw error;
-    }));
+    })().finally(() => {
+      describing = null;
+    });
+    return describing;
+  };
   const assets = (directory: string): WindowsDesktopAssets => ({
     binary: path.join(directory, 'cindy-windows-desktop-host.exe'),
     addon: path.join(directory, 'cindy-windows-desktop-host.node'),
@@ -103,7 +106,9 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
       /* Explicit setup prepares missing or partial assets. */
     }
     if (!prepare) return null;
-    if (building) return building;
+    if (building && buildingFingerprint === value.fingerprint) return building;
+    const fingerprint = value.fingerprint;
+    buildingFingerprint = fingerprint;
     building = (async () => {
       await fs.mkdir(value.directory, { recursive: true });
       const target =
@@ -154,7 +159,10 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
           .catch(() => {});
       }
     })().finally(() => {
-      building = null;
+      if (buildingFingerprint === fingerprint) {
+        building = null;
+        buildingFingerprint = null;
+      }
     });
     return building;
   }

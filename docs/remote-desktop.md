@@ -498,7 +498,9 @@ The service name retains the installation-scoped legacy identity, so setup repla
 the old on-demand service rather than leaving two brokers behind.
 
 Setup also protects the packaged application's code in place: its root and code
-directories, executable/DLL/V8 snapshot files, ASAR and unpacked native dependencies.
+directories, executable/DLL/V8 snapshot files, ASAR, unpacked native dependencies,
+and every file under `resources/tools` (including Main-loaded extraResource addons
+such as the Windows taskbar helper).
 It does not move the app or change parent-directory, userData, or workspace permissions.
 Protected code subsequently requires administrator rights to replace, including
 updates; the existing installer already handles protected-directory authorization.
@@ -509,9 +511,9 @@ Electron already seals `app.asar`; unpacked JS/`.node` has no Windows signed
 catalog, and these checks do not claim to sandbox same-user injection into a
 live Main. A later failure rolls those ACLs back, and uninstall restores
 the captured descriptors so a per-user uninstaller can delete the application again.
-Restore pins every captured object without DELETE sharing before changing ACLs,
-then applies nested objects first so a parent cannot be swapped for a junction
-between path checks and the descriptor write. Packaged Authenticode matching
+Restore pins the application path and every captured object without DELETE
+sharing before changing ACLs, then applies nested objects first so a parent
+cannot be swapped for a junction between path checks and the descriptor write. Packaged Authenticode matching
 reads the signer from the PKCS#7 message; CryptQueryObject leaves ppvContext
 null for embedded signatures.
 Reinstall keeps the first-install restore record: already-protected paths are not
@@ -542,8 +544,9 @@ The existing setting prepares Dev components only after the user clicks setup,
 then requests native UAC. Polling never compiles or elevates. Generated binaries
 are cached under userData by native source/runtime fingerprint, so a loaded Node
 addon is not overwritten. Normal source edits and Dev restarts reuse the grant;
-changed native service binaries show an update action requiring administrator
-approval. The broker checks the approved Windows user and exact bound Electron
+each settings poll and setup re-reads native source so a fingerprint change
+invalidates the cache without restarting Desktop. Changed native service
+binaries show an update action requiring administrator approval. The broker checks the approved Windows user and exact bound Electron
 image. An `electron .` entry is resolved against the process's actual working
 directory; utility/renderer processes and other app directories do not inherit it.
 

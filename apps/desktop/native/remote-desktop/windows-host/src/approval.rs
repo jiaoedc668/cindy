@@ -263,7 +263,7 @@ pub fn remove() -> Result<()> {
     let application = Approval::read().ok().map(|approval| approval.application);
     let snapshot = read_restore_record(&installation.directory)?;
     if let Some(snapshot) = &snapshot {
-        snapshot.restore_allowed(|path| match &application {
+        snapshot.restore_in(application.as_deref(), |path| match &application {
             Some(root) => security::path_is_within(path, root),
             None => installation::is_local_application_path(path),
         })?;
