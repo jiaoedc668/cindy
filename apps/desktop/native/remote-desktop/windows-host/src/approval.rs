@@ -142,6 +142,22 @@ impl Approval {
     }
 }
 
+fn read_restore_record(directory: &std::path::Path) -> Result<Option<security::AclSnapshot>> {
+    let restore = directory.join(installation::ACL_RESTORE);
+    if !restore.exists() {
+        return Ok(None);
+    }
+    security::check_paths(vec![restore.clone()])?;
+    let mut bytes = Vec::new();
+    fs::File::open(&restore)?
+        .take(1_048_577)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 1_048_576 {
+        return denied();
+    }
+    Ok(Some(security::AclSnapshot::decode(&bytes)?))
+}
+
 fn write_protected_record(directory: &std::path::Path, name: &str, bytes: &[u8]) -> Result<()> {
     let record = directory.join(name);
     let temporary = directory.join(format!("{name}.new"));
@@ -171,15 +187,23 @@ pub fn install(pid: u32) -> Result<()> {
     let (approval, _client) = Approval::for_client(pid)?;
     let source = std::env::current_exe()?.canonicalize()?;
     let target = Installation::for_source(&source)?;
-    // Refuse missing/broken packages and live writers before changing permissions.
+    // Refuse missing/broken packages, unsigned Main, and live writers before
+    // changing permissions. Reinstall must not wipe the first-install restore
+    // record: capture skips already-protected paths and would otherwise persist
+    // an empty snapshot.
     let snapshot = if installation::development_identity().is_none() {
         let paths = security::application_paths(&approval.application)?;
         let _ancestors = security::pin_ancestors(&approval.application)?;
+        security::authenticate_application_code(&approval.application, &approval.executable)?;
         Some(security::AclSnapshot::capture(&paths)?)
     } else {
         None
     };
-    let mut restore = snapshot.clone().map(security::AclRestoreGuard::new);
+    let mut restore = snapshot
+        .as_ref()
+        .filter(|snapshot| !snapshot.paths.is_empty())
+        .cloned()
+        .map(security::AclRestoreGuard::new);
     let _application = if let Some(snapshot) = &snapshot {
         for (path, _) in &snapshot.paths {
             security::secure_code(path)?;
@@ -203,12 +227,17 @@ pub fn install(pid: u32) -> Result<()> {
         security::copy_protected_payload(&source.with_file_name(name), &destination)?;
         security::secure_code(&destination)?;
     }
-    if let Some(snapshot) = &snapshot {
-        write_protected_record(
-            &target.directory,
-            installation::ACL_RESTORE,
-            &snapshot.encode(),
-        )?;
+    if let Some(captured) = snapshot {
+        let existing = read_restore_record(&target.directory)?;
+        if !(existing.is_some() && captured.paths.is_empty()) {
+            if let Some(combined) = security::AclSnapshot::combined(existing, captured) {
+                write_protected_record(
+                    &target.directory,
+                    installation::ACL_RESTORE,
+                    &combined.encode(),
+                )?;
+            }
+        }
     }
     write_protected_record(
         &target.directory,
@@ -232,20 +261,7 @@ pub fn remove() -> Result<()> {
     let ancestors = security::pin_ancestors(&installation.directory)?;
     security::check_paths(vec![installation.directory.clone()])?;
     let application = Approval::read().ok().map(|approval| approval.application);
-    let restore = installation.directory.join(installation::ACL_RESTORE);
-    let snapshot = if restore.exists() {
-        security::check_paths(vec![restore.clone()])?;
-        let mut bytes = Vec::new();
-        fs::File::open(&restore)?
-            .take(1_048_577)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > 1_048_576 {
-            return denied();
-        }
-        Some(security::AclSnapshot::decode(&bytes)?)
-    } else {
-        None
-    };
+    let snapshot = read_restore_record(&installation.directory)?;
     if let Some(snapshot) = &snapshot {
         for (path, descriptor) in &snapshot.paths {
             let allowed = match &application {

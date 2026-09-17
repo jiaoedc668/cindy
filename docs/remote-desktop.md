@@ -503,8 +503,14 @@ It does not move the app or change parent-directory, userData, or workspace perm
 Protected code subsequently requires administrator rights to replace, including
 updates; the existing installer already handles protected-directory authorization.
 If a live writer or other sharing conflict still holds a code file, setup refuses
-before changing ACLs. A later failure rolls those ACLs back, and uninstall restores
+before changing ACLs. Packaged setup also Authenticode-checks the approved Main
+executable against the elevated helper before hardening or recording approval.
+Electron already seals `app.asar`; unpacked JS/`.node` has no Windows signed
+catalog, and these checks do not claim to sandbox same-user injection into a
+live Main. A later failure rolls those ACLs back, and uninstall restores
 the captured descriptors so a per-user uninstaller can delete the application again.
+Reinstall keeps the first-install restore record: already-protected paths are not
+recaptured as an empty snapshot.
 The opt-in text discloses both service installation and program-file protection.
 Cancelling UAC runs neither step and does not disable ordinary remote desktop.
 

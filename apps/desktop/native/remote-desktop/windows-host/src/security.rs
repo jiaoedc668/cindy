@@ -209,44 +209,54 @@ pub fn check_paths(paths: Vec<PathBuf>) -> Result<Vec<Handle>> {
         let mut safe = trusted(owner);
         if safe {
             unsafe {
-                for i in 0..(*acl).AceCount as u32 {
-                    let mut ace = ptr::null_mut();
-                    if GetAce(acl, i, &mut ace) == 0 || ace.is_null() {
-                        safe = false;
-                        break;
+                if let Some(parsed) = acl.cast::<ACL>().as_ref() {
+                    for i in 0..parsed.AceCount as u32 {
+                        let mut ace = ptr::null_mut();
+                        if GetAce(acl, i, &mut ace) == 0 || ace.is_null() {
+                            safe = false;
+                            break;
+                        }
+                        let Some(header) = ace.cast::<ACE_HEADER>().as_ref() else {
+                            safe = false;
+                            break;
+                        };
+                        if header.AceFlags as u32 & INHERIT_ONLY_ACE != 0 {
+                            continue;
+                        }
+                        if header.AceType as u32 == ACCESS_DENIED_ACE_TYPE {
+                            continue;
+                        }
+                        if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE {
+                            safe = false;
+                            break;
+                        }
+                        if (header.AceSize as usize) < mem::size_of::<ACCESS_ALLOWED_ACE>() {
+                            safe = false;
+                            break;
+                        }
+                        let Some(allow) = ace.cast::<ACCESS_ALLOWED_ACE>().as_ref() else {
+                            safe = false;
+                            break;
+                        };
+                        let mutations = GENERIC_ALL
+                            | GENERIC_WRITE
+                            | WRITE_DAC
+                            | WRITE_OWNER
+                            | DELETE
+                            | FILE_WRITE_DATA
+                            | FILE_APPEND_DATA
+                            | FILE_WRITE_EA
+                            | FILE_WRITE_ATTRIBUTES
+                            | FILE_DELETE_CHILD;
+                        if allow.Mask & mutations != 0
+                            && !trusted((&allow.SidStart as *const u32).cast_mut().cast())
+                        {
+                            safe = false;
+                            break;
+                        }
                     }
-                    let header = &*ace.cast::<ACE_HEADER>();
-                    if header.AceFlags as u32 & INHERIT_ONLY_ACE != 0 {
-                        continue;
-                    }
-                    if header.AceType as u32 == ACCESS_DENIED_ACE_TYPE {
-                        continue;
-                    }
-                    if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE {
-                        safe = false;
-                        break;
-                    }
-                    if (header.AceSize as usize) < mem::size_of::<ACCESS_ALLOWED_ACE>() {
-                        safe = false;
-                        break;
-                    }
-                    let allow = &*ace.cast::<ACCESS_ALLOWED_ACE>();
-                    let mutations = GENERIC_ALL
-                        | GENERIC_WRITE
-                        | WRITE_DAC
-                        | WRITE_OWNER
-                        | DELETE
-                        | FILE_WRITE_DATA
-                        | FILE_APPEND_DATA
-                        | FILE_WRITE_EA
-                        | FILE_WRITE_ATTRIBUTES
-                        | FILE_DELETE_CHILD;
-                    if allow.Mask & mutations != 0
-                        && !trusted((&allow.SidStart as *const u32).cast_mut().cast())
-                    {
-                        safe = false;
-                        break;
-                    }
+                } else {
+                    safe = false;
                 }
             }
         }
@@ -755,6 +765,35 @@ impl AclSnapshot {
         Ok(Self { paths: captured })
     }
 
+    pub fn merge(&self, later: &Self) -> Self {
+        let mut paths = self.paths.clone();
+        for (path, descriptor) in &later.paths {
+            if paths.iter().any(|(existing, _)| {
+                same_file(existing, path)
+                    || existing
+                        .as_os_str()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(&path.as_os_str().to_string_lossy())
+            }) {
+                continue;
+            }
+            paths.push((path.clone(), descriptor.clone()));
+        }
+        Self { paths }
+    }
+
+    pub fn combined(existing: Option<Self>, captured: Self) -> Option<Self> {
+        let snapshot = match existing {
+            Some(existing) => existing.merge(&captured),
+            None => captured,
+        };
+        if snapshot.paths.is_empty() {
+            None
+        } else {
+            Some(snapshot)
+        }
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "version": 1,
@@ -937,6 +976,25 @@ fn signer_thumbprint(path: &Path) -> Result<Vec<u8>> {
     }
     thumbprint.truncate(size as usize);
     Ok(thumbprint)
+}
+
+/// The service trusts this packaged Main after UAC. Authenticode matches the
+/// elevated helper. Electron already seals `app.asar`; there is no Windows
+/// catalog for unpacked JS/`.node`, and same-user injection into a live Main
+/// is outside this broker's sandbox claim.
+pub fn authenticate_application_code(install: &Path, executable: &str) -> Result<()> {
+    let _ = application_paths(install)?;
+    let main = install.join(executable);
+    let handle = open_payload(&main)?;
+    verify_authenticode(&main, handle.0)?;
+    #[cfg(not(any(feature = "development", test)))]
+    {
+        let host = std::env::current_exe()?;
+        if signer_thumbprint(&main)? != signer_thumbprint(&host)? {
+            return denied();
+        }
+    }
+    Ok(())
 }
 
 fn verify_authenticode(path: &Path, handle: HANDLE) -> Result<()> {
@@ -1307,6 +1365,32 @@ mod tests {
         .is_err());
     }
     #[test]
+    fn reinstall_keeps_the_first_captured_restore_record() {
+        let first = AclSnapshot {
+            paths: vec![(PathBuf::from(r"D:\Custom Apps\Cindy.exe"), "O:FIRST".into())],
+        };
+        let empty = AclSnapshot { paths: Vec::new() };
+        let kept = AclSnapshot::combined(Some(first.clone()), empty).unwrap();
+        assert_eq!(kept.paths, first.paths);
+        assert!(AclSnapshot::combined(None, AclSnapshot { paths: Vec::new() }).is_none());
+        let extra = AclSnapshot {
+            paths: vec![
+                (
+                    PathBuf::from(r"D:\Custom Apps\Cindy.exe"),
+                    "O:SHOULD-NOT-REPLACE".into(),
+                ),
+                (PathBuf::from(r"D:\Custom Apps\resources"), "O:NEW".into()),
+            ],
+        };
+        let merged = first.merge(&extra);
+        assert_eq!(merged.paths.len(), 2);
+        assert_eq!(merged.paths[0].1, "O:FIRST");
+        assert_eq!(
+            merged.paths[1].0,
+            PathBuf::from(r"D:\Custom Apps\resources")
+        );
+    }
+    #[test]
     fn exclusive_payload_copy_preserves_bytes_and_rejects_open_writers() {
         let fixture = Fixture::new();
         let source = fixture.0.join("cindy-windows-desktop-input.exe");
@@ -1320,6 +1404,17 @@ mod tests {
             .unwrap();
         assert!(copy_protected_payload(&source, &fixture.0.join("blocked.exe")).is_err());
         drop(writer);
+    }
+    #[test]
+    fn application_code_authentication_requires_a_packaged_layout() {
+        let fixture = Fixture::new();
+        let app = fixture.0.join("Cindy");
+        std::fs::create_dir_all(app.join("resources")).unwrap();
+        std::fs::write(app.join("Cindy.exe"), b"fixture").unwrap();
+        assert!(authenticate_application_code(&app, "Cindy.exe").is_err());
+        std::fs::write(app.join("resources/app.asar"), b"fixture").unwrap();
+        authenticate_application_code(&app, "Cindy.exe").unwrap();
+        assert!(authenticate_application_code(&app, "missing.exe").is_err());
     }
     #[test]
     fn application_restore_paths_cannot_escape_the_install_root() {
@@ -1472,8 +1567,11 @@ mod tests {
             assert!(!acl.is_null());
             let mut mask = 0;
             unsafe {
-                let count = (*acl).AceCount as u32;
-                for index in 0..count {
+                let Some(parsed) = acl.cast::<ACL>().as_ref() else {
+                    LocalFree(sd);
+                    return 0;
+                };
+                for index in 0..parsed.AceCount as u32 {
                     let mut ace = ptr::null_mut();
                     if GetAce(acl, index, &mut ace) == 0 {
                         continue;
