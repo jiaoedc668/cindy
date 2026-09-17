@@ -1,11 +1,20 @@
 // @vitest-environment jsdom
-import { act, createElement, forwardRef, useImperativeHandle } from "react";
+import {
+  act,
+  createElement,
+  forwardRef,
+  useImperativeHandle,
+  useState,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import RemoteDesktopScreen from "../RemoteDesktopScreen";
+import RemoteDesktopScreen, {
+  RemoteDesktopSession,
+} from "../RemoteDesktopScreen";
 import { RemoteDesktopDisplaySettings } from "../RemoteDesktopDisplaySettings";
 import { AppState } from "react-native";
 import { goBackGuarded } from "@/utils/backGuard";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 vi.mock("../useAutoUnlockSettings", () => ({
   useAutoUnlockSettings: (
@@ -37,8 +46,26 @@ vi.mock("../useLockOnExitPreference", () => ({
     true,
   ],
 }));
+vi.mock("../usePictureInPicturePreference", () => ({
+  usePictureInPicturePreference: () => {
+    const [enabled, setEnabled] = useState(fixture.pipEnabled);
+    return [
+      enabled,
+      (value: boolean) => {
+        fixture.pipEnabled = value;
+        setEnabled(value);
+      },
+    ];
+  },
+}));
 
 const fixture = vi.hoisted(() => ({
+  nativeMedia: false,
+  pipEnabled: false,
+  nativeReceive: vi.fn(async (_message: object) => {}),
+  nativeInput: vi.fn(async (_message: object) => true),
+  nativeMessage: null as
+    null | ((event: { nativeEvent: { data: string } }) => void),
   nativeMenus: false,
   safe: { top: 59, bottom: 34, left: 0, right: 0 },
   securityAutoUnlock: false,
@@ -293,6 +320,24 @@ vi.mock("react-native-webview", () => ({
     return createElement("div", { "data-testid": p.testID });
   }),
 }));
+vi.mock("../NativeRemoteDesktopView", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../NativeRemoteDesktopView")>();
+  const Native = forwardRef((props: any, ref) => {
+    fixture.nativeMessage = props.onMessage;
+    useImperativeHandle(ref, () => ({
+      receive: fixture.nativeReceive,
+      sendInput: fixture.nativeInput,
+    }));
+    return createElement("div", { "data-native-inline": String(props.inlineVisible) });
+  });
+  return {
+    ...actual,
+    get NativeRemoteDesktopView() {
+      return fixture.nativeMedia ? Native : null;
+    },
+  };
+});
 
 let root: Root;
 let host: HTMLDivElement;
@@ -305,9 +350,14 @@ const visibleInputHint = () =>
     ?.lastElementChild?.textContent;
 const button = (key: string) =>
   host.querySelector<HTMLButtonElement>(`[aria-label="remoteDesktop.${key}"]`)!;
-beforeEach(() => {
+beforeEach(async () => {
+  await AsyncStorage.removeItem("cindy.mobile.remote-desktop.audio.v1");
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   vi.clearAllMocks();
+  fixture.nativeMedia = false;
+  fixture.pipEnabled = false;
+  fixture.nativeReceive.mockReset().mockResolvedValue(undefined);
+  fixture.nativeInput.mockReset().mockResolvedValue(true);
   fixture.platform = "ios";
   fixture.safe = { top: 59, bottom: 34, left: 0, right: 0 };
   fixture.hostPlatform = "darwin";
@@ -448,6 +498,476 @@ describe("remote desktop controls", () => {
     expect(host.textContent).toContain("remoteDesktop.connectionTimeout");
   });
 
+  const nativePresentation = async (
+    type: string,
+    values: Record<string, unknown> = {},
+  ) => {
+    await act(async () =>
+      fixture.nativeMessage!({
+        nativeEvent: {
+          data: JSON.stringify({ type, epoch: "lease", ...values }),
+        },
+      }),
+    );
+  };
+  const retainedViewer = async () => {
+    fixture.nativeMedia = true;
+    const callbacks = {
+      onBack: vi.fn(),
+      onRestore: vi.fn(),
+      onVisibility: vi.fn(),
+      onEnded: vi.fn(),
+    };
+    const render = (focused: boolean) =>
+      act(() =>
+        root.render(
+          <RemoteDesktopSession
+            deviceId="computer"
+            deviceName="My Mac"
+            focused={focused}
+            {...callbacks}
+          />,
+        ),
+      );
+    render(true);
+    await connect();
+    await nativePresentation("pipCapability", { supported: true });
+    act(() => button("operations").click());
+    await act(async () => button("smallWindow").click());
+    await act(async () => {
+      AppState.currentState = "inactive";
+      fixture.appState!("inactive");
+      AppState.currentState = "background";
+      fixture.appState!("background");
+    });
+    await nativePresentation("presentation", { active: true });
+    await act(async () => {
+      AppState.currentState = "active";
+      fixture.appState!("active");
+    });
+    return { ...callbacks, render };
+  };
+  it("changes only the background preference while controlling and during sound renegotiation", async () => {
+    fixture.nativeMedia = true;
+    fixture.systemAudio = true;
+    act(() => root.render(<RemoteDesktopScreen />));
+    await connect();
+    await nativePresentation("pipCapability", { supported: true });
+    act(() => button("operations").click());
+    const controls = requests().filter((r) => r.op === "control").length;
+    await act(async () => button("smallWindow").click());
+    expect(fixture.pipEnabled).toBe(true);
+    expect(requests().filter((r) => r.op === "presentation")).toHaveLength(0);
+    expect(requests().filter((r) => r.op === "control")).toHaveLength(controls);
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
+    await act(async () => button("sound").click());
+    await nativePresentation("pipCapability", { supported: false });
+    await act(async () => button("smallWindow").click());
+    expect(fixture.pipEnabled).toBe(false);
+    expect(button("smallWindow").disabled).toBe(false);
+    await act(async () => button("smallWindow").click());
+    expect(fixture.pipEnabled).toBe(true);
+    expect(
+      requests().filter((r) => r.op === "presentation" && r.enabled),
+    ).toHaveLength(0);
+    expect(requests().filter((r) => r.op === "control")).toHaveLength(controls);
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
+  });
+  it("keeps native PiP available after muting, restoring fullscreen and disabling PiP", async () => {
+    fixture.nativeMedia = true;
+    fixture.systemAudio = true;
+    act(() => root.render(<RemoteDesktopScreen />));
+    await connect();
+    await nativePresentation("pipCapability", { supported: true });
+    act(() => button("operations").click());
+    fixture.playback.mockClear();
+    await act(async () => button("sound").click());
+    expect(fixture.playback).toHaveBeenLastCalledWith(true);
+    expect(
+      sent()
+        .filter((m) => m.type === "videoSettings")
+        .at(-1),
+    ).toMatchObject({ audio: false });
+    // Native readiness is reported again after the muted stream reconnects.
+    await nativePresentation("streaming");
+    await nativePresentation("pipCapability", { supported: true });
+    expect(button("smallWindow").disabled).toBe(false);
+    await act(async () => button("smallWindow").click());
+    await act(async () => button("back").click());
+    await nativePresentation("presentation", { active: true });
+    await nativePresentation("presentation", { active: false });
+    act(() => button("operations").click());
+    await act(async () => button("smallWindow").click());
+    await nativePresentation("presentation", { active: false });
+    await nativePresentation("presentationFailed");
+    expect(fixture.playback).not.toHaveBeenCalledWith(false);
+    expect(fixture.pipEnabled).toBe(false);
+    expect(button("smallWindow").disabled).toBe(false);
+    act(() => root.unmount());
+    mounted = false;
+    expect(fixture.playback).toHaveBeenLastCalledWith(false);
+  });
+  it("prepares native video playback even when the host has no audio", async () => {
+    fixture.nativeMedia = true;
+    fixture.systemAudio = false;
+    act(() => root.render(<RemoteDesktopScreen />));
+    await connect();
+    expect(fixture.playback).toHaveBeenCalledWith(true);
+    expect(sent().find((m) => m.type === "init")).toMatchObject({
+      audio: false,
+    });
+  });
+  it("keeps the background option and restores control after returning fullscreen", async () => {
+    const viewer = await retainedViewer();
+    const controls = requests().filter(
+      (r) => r.op === "control" && r.enabled,
+    ).length;
+    await nativePresentation("presentationRestore");
+    await nativePresentation("presentation", { active: false });
+    expect(fixture.pipEnabled).toBe(true);
+    expect(sent()).toContainEqual(
+      expect.objectContaining({ type: "restorePresentation" }),
+    );
+    expect(
+      requests().filter((r) => r.op === "presentation" && !r.enabled),
+    ).toHaveLength(0);
+    expect(viewer.onEnded).not.toHaveBeenCalled();
+    expect(
+      requests().filter((r) => r.op === "control" && r.enabled),
+    ).toHaveLength(controls + 1);
+    act(() => button("operations").click());
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+  });
+  it("does not select view-only or label the viewer as view-only during actual PiP", async () => {
+    await retainedViewer();
+    expect(host.textContent).not.toContain("remoteDesktop.viewOnly");
+    act(() => button("operations").click());
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
+    expect(visibleInputHint()).toBe("remoteDesktop.controlUnavailableHint");
+    await act(async () => button("viewOnly").click());
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("true");
+    await nativePresentation("presentation", { active: false });
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("true");
+    expect(visibleInputHint()).toBe("remoteDesktop.viewOnlyHint");
+  });
+  it("waits for actual PiP before navigating back and keeps the connection mounted", async () => {
+    const viewer = await retainedViewer();
+    await nativePresentation("presentation", { active: false });
+    await act(async () => button("back").click());
+    expect(viewer.onBack).not.toHaveBeenCalled();
+    await nativePresentation("presentation", { active: true });
+    expect(viewer.onBack).toHaveBeenCalledOnce();
+    viewer.render(false);
+    expect(host.querySelector('[data-native-inline="false"]')).not.toBeNull();
+    expect(viewer.onVisibility).toHaveBeenLastCalledWith(false);
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+    await nativePresentation("presentationRestore");
+    expect(viewer.onRestore).toHaveBeenCalledOnce();
+    viewer.render(true);
+    expect(host.querySelector('[data-native-inline="true"]')).not.toBeNull();
+  });
+  it("finishes delayed Back using the callback from its original route", async () => {
+    const viewer = await retainedViewer();
+    await nativePresentation("presentation", { active: false });
+    await act(async () => button("back").click());
+    const laterBack = vi.fn();
+    act(() => root.render(
+      <RemoteDesktopSession
+        deviceId="computer"
+        deviceName="My Mac"
+        focused={true}
+        onBack={laterBack}
+        onRestore={viewer.onRestore}
+        onVisibility={viewer.onVisibility}
+        onEnded={viewer.onEnded}
+      />,
+    ));
+    await nativePresentation("presentation", { active: true });
+    expect(viewer.onBack).toHaveBeenCalledOnce();
+    expect(laterBack).not.toHaveBeenCalled();
+  });
+  it("starts PiP on route blur before hiding and restores the route on system fullscreen", async () => {
+    const viewer = await retainedViewer();
+    await nativePresentation("presentation", { active: false });
+    viewer.onVisibility.mockClear();
+    await act(async () => viewer.render(false));
+    expect(viewer.onVisibility).not.toHaveBeenCalledWith(false);
+    await nativePresentation("presentation", { active: true });
+    expect(viewer.onVisibility).toHaveBeenLastCalledWith(false);
+    await nativePresentation("presentationRestore");
+    expect(viewer.onRestore).toHaveBeenCalledOnce();
+    expect(viewer.onVisibility).toHaveBeenLastCalledWith(true);
+    viewer.render(true);
+    await nativePresentation("presentation", { active: false });
+    expect(fixture.pipEnabled).toBe(true);
+    expect(viewer.onEnded).not.toHaveBeenCalled();
+  });
+  it("does not let a control toggle strand an in-flight PiP handoff", async () => {
+    await retainedViewer();
+    await nativePresentation("presentation", { active: false });
+    act(() => button("operations").click());
+    let finish!: (value: unknown) => void;
+    const original = fixture.invoke.getMockImplementation()!;
+    fixture.invoke.mockImplementation((...args) =>
+      args[2][0].op === "presentation"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : original(...args),
+    );
+    const before = requests().filter((r) => r.op === "control").length;
+    await act(async () => button("back").click());
+    await act(async () => button("viewOnly").click());
+    expect(requests().filter((r) => r.op === "control")).toHaveLength(before);
+    await act(async () => finish({}));
+    await nativePresentation("presentation", { active: true });
+    await nativePresentation("presentation", { active: false });
+    expect(
+      requests()
+        .filter((r) => r.op === "control")
+        .at(-1),
+    ).toMatchObject({ enabled: true });
+    act(() => button("operations").click());
+    await act(async () => button("viewOnly").click());
+    expect(requests().filter((r) => r.op === "control")).toHaveLength(
+      before + 2,
+    );
+  });
+  it.each([true, false])(
+    "restores the prior control choice (%s) when a Home gesture is cancelled during preparation",
+    async (controlling) => {
+      fixture.nativeMedia = true;
+      act(() => root.render(<RemoteDesktopScreen />));
+      await connect();
+      await nativePresentation("pipCapability", { supported: true });
+      act(() => button("operations").click());
+      if (!controlling) await act(async () => button("viewOnly").click());
+      await act(async () => button("smallWindow").click());
+      const before = requests().filter((r) => r.op === "control").length;
+      let finish!: (value: unknown) => void;
+      const original = fixture.invoke.getMockImplementation()!;
+      fixture.invoke.mockImplementation((...args) =>
+        args[2][0].op === "presentation" && args[2][0].enabled
+          ? new Promise((resolve) => {
+              finish = resolve;
+            })
+          : original(...args),
+      );
+      await act(async () => {
+        AppState.currentState = "inactive";
+        fixture.appState!("inactive");
+      });
+      await act(async () => {
+        AppState.currentState = "active";
+        fixture.appState!("active");
+      });
+      await act(async () => finish({}));
+      expect(fixture.pipEnabled).toBe(true);
+      expect(button("viewOnly").getAttribute("aria-selected")).toBe(
+        String(!controlling),
+      );
+      expect(requests().filter((r) => r.op === "control")).toHaveLength(
+        before + Number(controlling),
+      );
+      expect(
+        sent().filter((m) => m.type === "presentation" && m.enabled),
+      ).toHaveLength(0);
+    },
+  );
+  it("ends a detached connection when PiP closes without clearing the option", async () => {
+    const viewer = await retainedViewer();
+    viewer.render(false);
+    await nativePresentation("presentation", { active: false });
+    expect(viewer.onEnded).toHaveBeenCalledOnce();
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(1);
+    expect(fixture.pipEnabled).toBe(true);
+  });
+  it.each(["smallWindow", "sound"])(
+    "restores control when %s stops an active PiP window",
+    async (action) => {
+      fixture.systemAudio = true;
+      await retainedViewer();
+      const controls = requests().filter(
+        (r) => r.op === "control" && r.enabled,
+      ).length;
+      act(() => button("operations").click());
+      await act(async () => button(action).click());
+      await nativePresentation("presentation", { active: false });
+      expect(
+        requests().filter((r) => r.op === "control" && r.enabled),
+      ).toHaveLength(controls + 1);
+      expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
+    },
+  );
+  it("does not restore control from a preparation reply after disconnect", async () => {
+    await retainedViewer();
+    await nativePresentation("presentation", { active: false });
+    act(() => button("operations").click());
+    let finish!: (value: unknown) => void;
+    const original = fixture.invoke.getMockImplementation()!;
+    fixture.invoke.mockImplementation((...args) =>
+      args[2][0].op === "presentation" && args[2][0].enabled
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : original(...args),
+    );
+    await act(async () => {
+      AppState.currentState = "inactive";
+      fixture.appState!("inactive");
+    });
+    await act(async () => button("disconnect").click());
+    const controls = requests().filter((r) => r.op === "control").length;
+    await act(async () => finish({}));
+    expect(requests().filter((r) => r.op === "control")).toHaveLength(controls);
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(1);
+  });
+  it("explicit disconnect still ends an enabled PiP connection", async () => {
+    const viewer = await retainedViewer();
+    act(() => button("operations").click());
+    await act(async () => button("disconnect").click());
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(1);
+    expect(viewer.onBack).toHaveBeenCalledOnce();
+    expect(fixture.pipEnabled).toBe(true);
+  });
+  it("keeps a bounded Home transition while waiting for view-only authorization", async () => {
+    await retainedViewer();
+    await nativePresentation("presentation", { active: false });
+    act(() => button("operations").click());
+    await act(async () => button("viewOnly").click());
+    let finish!: (value: unknown) => void;
+    const original = fixture.invoke.getMockImplementation()!;
+    fixture.invoke.mockImplementation((...args) =>
+      args[2][0].op === "presentation"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : original(...args),
+    );
+    await act(async () => {
+      AppState.currentState = "inactive";
+      fixture.appState!("inactive");
+      AppState.currentState = "background";
+      fixture.appState!("background");
+    });
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+    expect(sent()).toContainEqual(
+      expect.objectContaining({ type: "pipPolicy", preparing: true }),
+    );
+    await act(async () => finish({}));
+    await nativePresentation("presentation", { active: true });
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+  });
+  it("routes native negotiation and stops the exact old native lease on pause", async () => {
+    fixture.nativeMedia = true;
+    act(() => root.render(<RemoteDesktopScreen />));
+    await connect();
+    expect(fixture.nativeReceive).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "init",
+        epoch: "lease",
+        net: expect.any(Object),
+      }),
+    );
+    await act(async () =>
+      fixture.nativeMessage!({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: "iceConfig",
+            epoch: "lease",
+            attemptId: "native-1",
+          }),
+        },
+      }),
+    );
+    expect(fixture.nativeReceive).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "iceConfig",
+        epoch: "lease",
+        attemptId: "native-1",
+        iceServers: expect.any(Array),
+      }),
+    );
+    act(() => {
+      AppState.currentState = "background";
+      fixture.appState!("background");
+    });
+    expect(fixture.nativeReceive).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "stop", epoch: "lease" }),
+    );
+  });
+
+  it("uses native input transport with RPC fallback and rejects stale native streaming", async () => {
+    fixture.nativeMedia = true;
+    act(() => root.render(<RemoteDesktopScreen />));
+    await connect();
+    await act(async () =>
+      fixture.nativeMessage!({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: "iceConfig",
+            epoch: "lease",
+            attemptId: "native-2",
+          }),
+        },
+      }),
+    );
+    act(() =>
+      fixture.nativeMessage!({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: "streaming",
+            epoch: "lease",
+            attemptId: "native-1",
+          }),
+        },
+      }),
+    );
+    expect(sent().some((m) => m.type === "nativeVideo" && m.active)).toBe(
+      false,
+    );
+    act(() =>
+      fixture.nativeMessage!({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: "streaming",
+            epoch: "lease",
+            attemptId: "native-2",
+          }),
+        },
+      }),
+    );
+    expect(sent()).toContainEqual({
+      type: "nativeVideo",
+      epoch: "lease",
+      active: true,
+    });
+    const input = {
+      type: "input",
+      epoch: "lease",
+      sequence: 1,
+      events: [{ kind: "move", x: 0.5, y: 0.5 }],
+    };
+    await act(async () =>
+      fixture.message!({ nativeEvent: { data: JSON.stringify(input) } }),
+    );
+    expect(fixture.nativeInput).toHaveBeenCalledWith(input);
+    expect(requests().filter((r) => r.op === "input")).toHaveLength(0);
+    fixture.nativeInput.mockResolvedValue(false);
+    await act(async () =>
+      fixture.message!({
+        nativeEvent: { data: JSON.stringify({ ...input, sequence: 2 }) },
+      }),
+    );
+    expect(requests()).toContainEqual({
+      op: "input",
+      lease: "lease",
+      sequence: 2,
+      events: input.events,
+    });
+  });
   it("retries an initial capabilities timeout normally on a legacy host", async () => {
     const original = fixture.invoke.getMockImplementation()!;
     let attempts = 0;
@@ -491,7 +1011,7 @@ describe("remote desktop controls", () => {
     expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
     expect(requests().filter((r) => r.op === "start")).toHaveLength(1);
   });
-  it("reflects a host-side input failure as view-only without replacing the video lease", async () => {
+  it("reports unavailable host input without selecting view-only or replacing the video lease", async () => {
     await connect();
     const original = fixture.invoke.getMockImplementation()!;
     fixture.invoke.mockImplementation((...args) =>
@@ -506,7 +1026,8 @@ describe("remote desktop controls", () => {
     expect(requests().filter((r) => r.op === "start")).toHaveLength(1);
     expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
     act(() => button("operations").click());
-    expect(visibleInputHint()).toBe("remoteDesktop.viewOnlyHint");
+    expect(visibleInputHint()).toBe("remoteDesktop.controlUnavailableHint");
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
   });
   it("keeps iOS data detection disabled without passing its prop to Android", async () => {
     await act(async () => {});
@@ -2274,7 +2795,8 @@ describe("remote desktop controls", () => {
     expect(host.textContent).not.toContain("remoteDesktop.reconnecting");
     expect(sent()).toContainEqual({ type: "control", enabled: false });
     act(() => button("operations").click());
-    expect(visibleInputHint()).toBe("remoteDesktop.viewOnlyHint");
+    expect(visibleInputHint()).toBe("remoteDesktop.controlUnavailableHint");
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
   });
   it("keeps control and the session when an input reply is lost", async () => {
     await connect();
@@ -2303,7 +2825,7 @@ describe("remote desktop controls", () => {
     expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
     expect(host.textContent).not.toContain("remoteDesktop.reconnecting");
   });
-  it("follows the host to view only when its heartbeat stops counting this viewer as controlling", async () => {
+  it("stops input without changing the user's view-only choice when host control is revoked", async () => {
     await connect();
     const original = fixture.invoke.getMockImplementation()!;
     fixture.invoke.mockImplementation((...args) =>
@@ -2316,7 +2838,8 @@ describe("remote desktop controls", () => {
     expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
     expect(host.textContent).not.toContain("remoteDesktop.reconnecting");
     act(() => button("operations").click());
-    expect(visibleInputHint()).toBe("remoteDesktop.viewOnlyHint");
+    expect(visibleInputHint()).toBe("remoteDesktop.controlUnavailableHint");
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
   });
   it("releases a stalled input batch instead of rebuilding the session", async () => {
     await connect();
@@ -2406,7 +2929,14 @@ describe("remote desktop controls", () => {
       .map((r) => r.enabled);
     // Overflow timed out with pending release. Take control must finish that
     // release (host stopInput) before asking to enable, so the helper restarts.
-    expect(controlOps).toEqual([true, false, false, true]);
+    expect(controlOps).toEqual([true, false, false]);
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("true");
+    await act(async () => button("viewOnly").click());
+    expect(
+      requests()
+        .filter((r) => r.op === "control")
+        .map((r) => r.enabled),
+    ).toEqual([true, false, false, true]);
     expect(
       sent()
         .filter((m) => m.type === "control")

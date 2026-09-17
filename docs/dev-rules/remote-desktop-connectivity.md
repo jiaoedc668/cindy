@@ -38,6 +38,64 @@ TURN; old viewer + new Desktop can use host-side TURN. Existing full-SDP and tri
 ICE capabilities stay unchanged. The desktop-video connectivity change adds no new wire kinds or native dependencies.
 The independent file transport below has its own authorized IPC channel.
 
+## iOS native video and Picture in Picture
+
+New iOS binaries expose `CindyRemotePresentation.nativeVideo`. They receive and
+decode WebRTC in `RemoteDesktopReceiver`, and display sample buffers through
+`RemoteDesktopVideoView` / AVKit. The WebView retains input, cursor and viewport
+geometry only. Older binaries and Android retain the browser receiver; JPEG
+compatibility frames remain available on every platform. The native receiver uses
+the same full-SDP/trickle-ICE signaling adapter, scoped TURN configuration and
+bounded retry policy. No protocol version or service endpoint changes.
+
+While system PiP is actually active, the native DataChannel answers the existing
+viewing challenges without React or WebView JavaScript. Desktop preserves only
+an authorized, non-controlling presentation across transient signaling loss;
+ordinary subscriptions and file transfers still stop. The existing 12-second
+lease expires if media pongs stop. Explicit disconnect, revocation, disabling
+remote control and host shutdown still stop the presentation immediately.
+An offline event for a different peer cannot terminate the active viewer.
+The native receiver retains the host's single pending challenge if it arrives
+before PiP entry, and answers only after AVKit confirms active presentation.
+Voice-input cleanup releases only its own recording session; background entry
+and delayed prewarm cleanup must not deactivate PiP's playback session.
+
+Run in background is an explicit phone-local preference (default off), separate
+from the current AVKit presentation state and the user's control choice. Toggling
+it does not enter PiP or release control, and audio renegotiation does not disable
+the preference. Only actual entry uses the host's view-only presentation handoff;
+returning to an active, visible fullscreen viewer restores the previous control
+choice through normal host authorization. A cancelled Home gesture also restores
+that choice after any pending preparation settles. Restoring fullscreen does not clear
+the preference. While enabled, leaving the desktop route minimizes into PiP;
+leaving the app prepares view-only presentation and allows AVKit automatic entry.
+One account-generation-scoped root host retains the same media surface across
+routes. A minimized desktop is removed from navigation history without changing
+the other pages or their parameters. Fullscreen restoration opens one desktop
+entry above the current page; Back returns to that page. Delayed PiP callbacks
+are bound to their source route and cannot pop a newly opened page. The retained
+surface only becomes visible once its desktop route is current.
+Closing a detached PiP window or explicitly disconnecting ends the connection,
+but keeps the preference. Back-to-PiP does not run lock-on-exit; disconnect does.
+Preparation has a bounded deadline and never renews a controlling lease.
+
+Closing PiP in the background stops native media even if JS is suspended. Network
+changes that require a new SDP exchange recover after foreground signaling
+returns; continuous background renegotiation is not promised. Frames and ICE
+credentials stay in memory, with no recording or new media store.
+
+The WebRTC SDK and Swift module change require a rebuilt iOS binary (cold update),
+not OTA alone. Verify silent and audible streams, explicit stop/revoke, switching
+apps for several minutes, PiP close/restore, network loss, zoom/keyboard geometry,
+and Light/Dark on a physical phone. Unit tests and simulator builds do not establish
+background PiP acceptance. Roll out the Desktop signaling-loss fix with the native
+phone build; older Desktop hosts may still stop media when signaling disconnects.
+
+iOS 27 SDK builds also require the scene lifecycle. Expo 57.0.23 or newer and
+`expo-build-properties`'s `ios.enableSceneSupport` generate Expo's scene delegate
+manifest and move window startup out of the legacy app delegate. Verify actual
+device launch: compilation alone does not detect UIKit's missing-scene launch trap.
+
 ## Verification
 
 Unit tests cover invalid/expired tickets, old/disabled backends, bounded requests,
