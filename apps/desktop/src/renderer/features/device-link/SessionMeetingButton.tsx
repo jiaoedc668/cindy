@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { WINDOW_NO_DRAG_STYLE } from '@/components/layout/windowDrag';
 import { toast } from '@/lib/toast';
+import { extractIpcError } from '@/utils/ipcError';
 
 /** Owner controls use the same task host locally and through own-device control. */
 export function SessionMeetingButton({ session }: { session: Session }) {
@@ -36,9 +37,21 @@ export function SessionMeetingButton({ session }: { session: Session }) {
     const captured = ++epoch.current;
     setState(null);
     pending.current = false; setBusy(false);
-    void load(captured).catch(() => undefined);
+    void load(captured).catch((error: unknown) => {
+      const code = extractIpcError(error)?.code;
+      if (code === 'DEVICE_LINK_CHANNEL_NOT_ALLOWED' || code === 'DEVICE_LINK_VERSION_MISMATCH') {
+        if (captured === epoch.current) setState({ available: false, detail: null });
+      }
+    });
     if (!open) return () => { epoch.current++; };
-    const timer = setInterval(() => { if (!pending.current) void load(captured).catch(() => undefined); }, 5_000);
+    const timer = setInterval(() => {
+      if (!pending.current) void load(captured).catch((error: unknown) => {
+        const code = extractIpcError(error)?.code;
+        if ((code === 'DEVICE_LINK_CHANNEL_NOT_ALLOWED' || code === 'DEVICE_LINK_VERSION_MISMATCH') && captured === epoch.current) {
+          setState({ available: false, detail: null });
+        }
+      });
+    }, 5_000);
     return () => { epoch.current++; clearInterval(timer); };
   }, [dataOwnerId, ownerGeneration, load, open]);
   const run = async (work: () => Promise<unknown>, reload = true) => {

@@ -158,6 +158,8 @@ import { createVisualMockDeviceLinkContext, seedVisualMockStore } from '@/debug/
 
 export interface DeviceLinkContextValue {
   status: DeviceLinkStatus;
+  /** Whether the connected relay advertised shared-task routing. */
+  sessionMeetingAvailable?: boolean;
   /** Peers with queued, running, or retrying recovery work. Read-only UI projection. */
   recoveringDeviceIds: ReadonlySet<string>;
   /** 连接层可分类的失败原因(鉴权失效/被顶号/超限/版本不符);null = 无异常 */
@@ -392,6 +394,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
   // 发起代仍为当前代时登记远端 ACK,避免迟到成功覆盖较新的 unsubscribe。
   const backgroundReleaseGenerationRef = useRef(0);
   const [status, setStatus] = useState<DeviceLinkStatus>('stopped');
+  const [sessionMeetingAvailable, setSessionMeetingAvailable] = useState(false);
   const [connectionIssue, setConnectionIssue] = useState<DeviceLinkConnectionIssue | null>(null);
   const [presenceVersion, setPresenceVersion] = useState(0);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
@@ -885,6 +888,8 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     const offIssue = client.onConnectionIssue(setConnectionIssue);
     const offStatus = client.onStatusChange((next) => {
       setStatus(next);
+      setSessionMeetingAvailable(next === 'online' && typeof client.hasServerCapability === 'function'
+        && client.hasServerCapability(SESSION_MEETING_CAPABILITY));
       if (next !== 'online') {
         openLinkInFlightRef.current.clear();
         remoteSubscribedTopicsRef.current.clear();
@@ -1419,6 +1424,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<DeviceLinkContextValue>(() => ({
     status,
+    sessionMeetingAvailable,
     recoveringDeviceIds,
     connectionIssue,
     presenceVersion,
@@ -1448,6 +1454,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     reopenLink,
     presenceVersion,
     status,
+    sessionMeetingAvailable,
     subscribe,
     unsubscribe,
     subscribeRemoteAgentRoster,

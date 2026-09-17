@@ -44,7 +44,7 @@ export default function SharedSessionScreen() {
   const load = useCallback(async () => {
     const captured = epoch.current;
     const owner = getMobileAuthOwner();
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || link.sessionMeetingAvailable === false) return;
     if (sessionId && deviceId) {
       const value = guestId ? { available: true, detail: await api.get(guestId) }
         : await host({ action: 'state', sessionId }) as SessionMeetingHostState;
@@ -53,7 +53,7 @@ export default function SharedSessionScreen() {
       const value = (await api.list()).filter((task) => task.ownerAccountId !== owner.accountId);
       if (mounted.current && captured === epoch.current && isMobileAuthOwnerCurrent(owner)) setTasks(value);
     }
-  }, [api, deviceId, guestId, host, isAuthenticated, sessionId]);
+  }, [api, deviceId, guestId, host, isAuthenticated, link.sessionMeetingAvailable, sessionId]);
   useEffect(() => {
     mounted.current = true;
     epoch.current++; pending.current = false; setBusy(false);
@@ -96,7 +96,7 @@ export default function SharedSessionScreen() {
     <SimpleStackHeader title={t(sessionId ? 'sessionMeeting.title' : 'sessionMeeting.join')} onBack={() => goBackGuarded(router)} />
     <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
       {!!notice && <Text accessibilityRole="alert" style={styles.text}>{notice}</Text>}
-      {!isAuthenticated ? <Text style={styles.text}>{t('sessionMeeting.login')}</Text> : sessionId && deviceId ? <>
+      {!isAuthenticated ? <Text style={styles.text}>{t('sessionMeeting.login')}</Text> : link.sessionMeetingAvailable === false ? <Text style={styles.text}>{t('sessionMeeting.upgrade')}</Text> : sessionId && deviceId ? <>
         {!state ? <Text style={styles.text}>{t('sessionMeeting.sharing')}</Text> : !state.available ? <Text style={styles.text}>{t('sessionMeeting.upgrade')}</Text> : !detail ?
           !guestId && <><Text style={styles.text}>{t('sessionMeeting.sharing')}</Text><MainWindowActionButton action={{ label: t('sessionMeeting.open'), busy: busy, onPress: () => void run(async () => { await host({ action: 'open', sessionId }); }) }} /></> : <>
           <Text style={styles.text}>{t('sessionMeeting.host')}</Text>

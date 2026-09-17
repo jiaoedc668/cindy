@@ -11,9 +11,9 @@ import { useSessionMeetingApi } from './useSessionMeetingApi';
 export function useSharedTasks(): void {
   const { accountGeneration, isAuthenticated } = useAuth();
   const api = useSessionMeetingApi();
-  const { openLink, closeLink, invoke, status } = useDeviceLink();
+  const { openLink, closeLink, invoke, status, sessionMeetingAvailable } = useDeviceLink();
   useEffect(() => {
-    if (!isAuthenticated || status !== 'online') return;
+    if (!isAuthenticated || status !== 'online' || sessionMeetingAvailable === false) return;
     const owner = getMobileAuthOwner();
     let disposed = false;
     let busy = false;
@@ -49,5 +49,5 @@ export function useSharedTasks(): void {
     void poll();
     const timer = setInterval(() => { void poll(); }, 5_000);
     return () => { disposed = true; clearInterval(timer); };
-  }, [accountGeneration, api, closeLink, invoke, isAuthenticated, openLink, status]);
+  }, [accountGeneration, api, closeLink, invoke, isAuthenticated, openLink, sessionMeetingAvailable, status]);
 }
