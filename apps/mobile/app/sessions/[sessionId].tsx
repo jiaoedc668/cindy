@@ -172,7 +172,6 @@ import { SheetModal } from '@/session/SheetModal';
 import { SheetGrabber, SheetSurface } from '@/session/SheetSurface';
 import { NativePermissionSheet } from '@/session/NativePermissionSheet';
 import { MobilePermissionPickerList } from '@/session/MobilePermissionPickerList';
-import { PiSessionTreeSheet } from '@/session/PiSessionTreeSheet';
 import { computeContextSheetSnapHeights, type ContextSheetSnap } from '@/session/contextSheetModel';
 import { permissionAccentColor, permissionPresentation } from '@/session/permissionPresentation';
 import {
@@ -1417,8 +1416,6 @@ export default function SessionScreen() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [menuInitialView, setMenuInitialView] = useState<SessionMenuView>('menu');
-  const [sessionTreeOpen, setSessionTreeOpen] = useState(false);
-  const [sessionTreePendingOpen, setSessionTreePendingOpen] = useState(false);
   const [sessionSearchPendingOpen, setSessionSearchPendingOpen] = useState(false);
   // inline 排队区:展开操作行的条目(同时只展开一条;null=全收起)。
   const [queueSelectedClientId, setQueueSelectedClientId] = useState<string | null>(null);
@@ -2800,19 +2797,12 @@ export default function SessionScreen() {
     setMenuInitialView(view);
     setSettingsOpen(true);
   }, []);
-  const openSessionTreeAfterMenu = useCallback(() => {
-    setSessionTreePendingOpen(true);
-    setSettingsOpen(false);
-  }, []);
   const handleSessionMenuClosed = useCallback(() => {
     if (sessionSearchPendingOpen) {
       setSessionSearchPendingOpen(false);
       setSearchOpen(true);
     }
-    if (!sessionTreePendingOpen) return;
-    setSessionTreePendingOpen(false);
-    setSessionTreeOpen(true);
-  }, [sessionTreePendingOpen, sessionSearchPendingOpen]);
+  }, [sessionSearchPendingOpen]);
   const measureSendButtonTarget = useCallback(() => {
     sendButtonRef.current?.measureInWindow((x, y, width, height) => {
       sendButtonFrameRef.current = { x, y, width, height };
@@ -3013,8 +3003,6 @@ export default function SessionScreen() {
     if (!sessionManagedByHost) return;
     setSettingsOpen(false);
     setModelSheetOpen(false);
-    setSessionTreeOpen(false);
-    setSessionTreePendingOpen(false);
     if (contextSheetView !== 'main') {
       setContextSheetView('main');
       setContextSheetOpen(false);
@@ -8383,7 +8371,6 @@ export default function SessionScreen() {
   screenshotBlockedByOverlayRef.current = Boolean(
     settingsOpen
     || searchOpen
-    || (sessionTreeOpen && currentSession?.agentKind === 'pi')
     || contextSheetOpen
     || chipMenuTarget !== null
     || (modelSheetOpen && canUseComposer)
@@ -9079,9 +9066,6 @@ export default function SessionScreen() {
                 params: { sessionId, deviceId, deviceName },
               });
             }}
-            onOpenSessionTree={currentSession.agentKind === 'pi'
-              ? openSessionTreeAfterMenu
-              : undefined}
             onRegenerateTitle={() => maker.regenerateSessionTitle(sessionId)}
             onRename={(title) => patchSessionMeta({ title })}
             onRestore={() => patchSessionMeta({ status: 'active' })}
@@ -9099,20 +9083,6 @@ export default function SessionScreen() {
             visible={settingsOpen}
           />
         ) : null}
-        <PiSessionTreeSheet
-          disabledReason={remoteSessionRunning
-            ? t('session.menu.branchRunningBlocked')
-            : collaborationReadOnlyReason}
-          maker={maker}
-          onClose={() => setSessionTreeOpen(false)}
-          onNavigated={async (draftText) => {
-            if (draftText) applyComposerDocument(textComposerDocument(draftText));
-            setSessionTreeOpen(false);
-            await requestSync({ reason: 'session-tree-navigate', replaceMessages: true });
-          }}
-          sessionId={sessionId}
-          visible={sessionTreeOpen && currentSession?.agentKind === 'pi'}
-        />
         <SessionSearchSheet
           activeHit={activeSearchHit}
           activeIndex={activeSearchIndex}
