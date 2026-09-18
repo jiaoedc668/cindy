@@ -638,12 +638,22 @@ fn apply_descriptor(handle: HANDLE, descriptor: &str) -> Result<()> {
     // Unlike SetSecurityInfo's tree propagation, update this exact open object.
     // App-owned code paths are enumerated explicitly; unrelated descendants
     // must keep their original permissions, even if located below the app root.
+    let mut control = 0;
+    let mut revision = 0;
+    if unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) } == 0 {
+        let code = unsafe { GetLastError() };
+        unsafe { LocalFree(sd); }
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    let inheritance = if control & SE_DACL_PROTECTED != 0 {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    } else { UNPROTECTED_DACL_SECURITY_INFORMATION };
     let result = unsafe {
         SetKernelObjectSecurity(
             handle,
             OWNER_SECURITY_INFORMATION
                 | DACL_SECURITY_INFORMATION
-                | PROTECTED_DACL_SECURITY_INFORMATION,
+                | inheritance,
             sd,
         )
     };
@@ -903,7 +913,8 @@ impl AclSnapshot {
         let mut pinned = Vec::new();
         for (path, descriptor) in ordered {
             if path.exists() {
-                pinned.push((path, open_for_acl(&path)?, descriptor));
+                let handle = open_for_acl(&path)?;
+                pinned.push((path, handle, descriptor));
             }
         }
         pinned.sort_by(|(a, _, _), (b, _, _)| restore_depth(a, b));
@@ -1484,7 +1495,9 @@ mod tests {
         std::fs::write(&code, b"fixture").unwrap();
         let before = descriptor(&code);
         let writer = std::fs::OpenOptions::new().write(true).open(&code).unwrap();
-        let error = AclSnapshot::capture(&[code.clone()]).unwrap_err();
+        let error = AclSnapshot::capture(&[code.clone()])
+            .err()
+            .expect("a live writer must prevent ACL capture");
         assert!(sharing_conflict(&error));
         assert_eq!(descriptor(&code), before);
         drop(writer);
@@ -1495,16 +1508,24 @@ mod tests {
         let fixture = Fixture::new();
         let code = fixture.0.join("Cindy.exe");
         std::fs::write(&code, b"fixture").unwrap();
-        let before = descriptor(&code);
-        let snapshot = AclSnapshot::capture(&[code.clone()]).unwrap();
         let sid = token_user_sid(
             token(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() })
                 .unwrap()
                 .0,
         )
         .unwrap();
-        secure_code_with_descriptor(&code, &format!("O:{sid}D:P(A;;FR;;;{sid})")).unwrap();
+        // Use an explicit unprotected ACL. The machine's inherited AI bookkeeping
+        // is not stable across SetKernelObjectSecurity, unlike the permissions
+        // and inheritance-protection mode that this test must restore exactly.
+        secure_code_with_descriptor(&code, &format!("O:{sid}D:(A;;FA;;;{sid})")).unwrap();
+        let before = descriptor(&code);
+        let snapshot = AclSnapshot::capture(&[code.clone()]).unwrap();
+        // The fixture's user stands in for the privileged restorer: preserve
+        // WRITE_OWNER, while denying data writes. Production grants the service
+        // and administrators full access to restore the captured descriptor.
+        secure_code_with_descriptor(&code, &format!("O:{sid}D:P(A;;FRWO;;;{sid})")).unwrap();
         assert_ne!(descriptor(&code), before);
+        assert!(std::fs::OpenOptions::new().write(true).open(&code).is_err());
         snapshot.restore().unwrap();
         assert_eq!(descriptor(&code), before);
         std::fs::write(&code, b"writable again").unwrap();
@@ -1523,6 +1544,14 @@ mod tests {
         let child = nested.join("resources");
         std::fs::create_dir_all(&child).unwrap();
         std::fs::write(child.join("app.asar"), b"fixture").unwrap();
+        let sid = token_user_sid(
+            token(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() })
+                .unwrap().0,
+        ).unwrap();
+        // Test the protected case independently of the unprotected file above.
+        for path in [&nested, &child] {
+            secure_code_with_descriptor(path, &format!("O:{sid}D:P(A;;FA;;;{sid})")).unwrap();
+        }
         let before_root = descriptor(&nested);
         let before_child = descriptor(&child);
         let tree = AclSnapshot::capture(&[nested.clone(), child.clone()]).unwrap();
@@ -1539,7 +1568,8 @@ mod tests {
         )
         .unwrap();
         secure_code_with_descriptor(&nested, &format!("O:{sid}D:P(A;;FA;;;{sid})")).unwrap();
-        secure_code_with_descriptor(&child, &format!("O:{sid}D:P(A;;FR;;;{sid})")).unwrap();
+        secure_code_with_descriptor(&child, &format!("O:{sid}D:P(A;;FRWO;;;{sid})")).unwrap();
+        assert!(std::fs::write(child.join("new-file"), b"denied").is_err());
         tree.restore().unwrap();
         assert_eq!(descriptor(&nested), before_root);
         assert_eq!(descriptor(&child), before_child);

@@ -37,6 +37,13 @@ The full contract and remaining installed-service validation are documented in
 
 Run native behavior checks without installing a service or prompting for UAC:
 
+Desktop TypeScript/unit checks do not compile this Rust crate. Before delivering
+changes to the Windows host, run its native tests in both default and
+`--features development` configurations, then run the Dev preparation flow that
+builds the release host, input helper and Node addon. The development build must
+set `CINDY_DESKTOP_DEV_APP` and `CINDY_DESKTOP_DEV_EXECUTABLE` to its exact checkout
+and Electron paths. A passing Node test suite alone is not a successful native build.
+
 ```text
 cargo test --locked --manifest-path apps/desktop/native/remote-desktop/windows-host/Cargo.toml --bin cindy-windows-desktop-host --target-dir <unique-temporary-directory> -- --test-threads=1
 ```
