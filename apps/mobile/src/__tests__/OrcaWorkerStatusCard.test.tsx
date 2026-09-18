@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   listOrcaWorkersByLead: vi.fn(),
   connectionEpoch: 0,
+  peerAvailable: true as boolean | null,
   colors: {
     surface: 'SURFACE',
     border: 'BORDER',
@@ -41,7 +42,10 @@ vi.mock('@/components/AppText', () => ({
 }));
 vi.mock('@/theme', () => ({ useTheme: () => ({ colors: h.colors }) }));
 vi.mock('@/device-link/DeviceLinkContext', () => ({
-  useDeviceLink: () => ({ connectionEpoch: h.connectionEpoch }),
+  useDeviceLink: () => ({
+    connectionEpoch: h.connectionEpoch,
+    getPresenceAvailability: () => h.peerAvailable,
+  }),
 }));
 vi.mock('@/i18n', () => ({ i18n: { t: (key: string) => key } }));
 vi.mock('@/theme/tokens', () => ({
@@ -63,6 +67,7 @@ let root: Root;
 beforeEach(() => {
   h.listOrcaWorkersByLead.mockReset();
   h.connectionEpoch = 0;
+  h.peerAvailable = true;
   leadSeq += 1;
   lead = `lead-${leadSeq}`;
   container = document.createElement('div');
@@ -87,6 +92,7 @@ async function render(workers: unknown[], onOpenWorker?: (id: string) => boolean
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: lead,
+        deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
         onOpenWorker,
       }),
@@ -258,6 +264,7 @@ it('换 Lead 后不得闪出上一个 Lead 的列表', async () => {
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: `${lead}-B`,
+        deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
       }),
     );
@@ -274,6 +281,7 @@ it('CHANNEL_NOT_ALLOWED 是永久兼容结果:只探一次即停轮询', async (
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: lead,
+        deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
       }),
     );
@@ -295,6 +303,7 @@ it('瞬时失败仍继续轮询,并在恢复后显示', async () => {
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: lead,
+        deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
       }),
     );
@@ -337,6 +346,7 @@ it('device-link 重连(connectionEpoch 变化)后重新探测通道', async () =
   const render1 = () => root.render(
     createElement(OrcaWorkerStatusCard as any, {
       leadSessionId: lead,
+      deviceId: 'dev-1',
       maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
     }),
   );
@@ -354,4 +364,36 @@ it('device-link 重连(connectionEpoch 变化)后重新探测通道', async () =
   expect(h.listOrcaWorkersByLead.mock.calls.length).toBeGreaterThan(1);
   await act(async () => toggle().click());
   expect(container.textContent).toContain('w-after-reconnect');
+});
+
+it('仅被控端重启(connectionEpoch 不变)也必须重探通道', async () => {
+  vi.useFakeTimers();
+  h.listOrcaWorkersByLead.mockRejectedValue(
+    Object.assign(new Error('rejected'), { code: 'CHANNEL_NOT_ALLOWED' }),
+  );
+  const draw = () => root.render(
+    createElement(OrcaWorkerStatusCard as any, {
+      leadSessionId: lead,
+      deviceId: 'dev-1',
+      maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
+    }),
+  );
+  await act(async () => { draw(); });
+  expect(h.listOrcaWorkersByLead).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
+  expect(h.listOrcaWorkersByLead).toHaveBeenCalledTimes(1); // 已停轮询
+
+  // 被控端升级重启:只有该 peer 掉线再上线,controller 未重连 relay。
+  h.listOrcaWorkersByLead.mockResolvedValue([
+    { id: 'a', label: 'w-peer-back', status: 'running', sessionId: 's-a' },
+  ]);
+  h.peerAvailable = false;
+  await act(async () => { draw(); });
+  h.peerAvailable = true;
+  await act(async () => { draw(); });
+
+  expect(h.connectionEpoch).toBe(0); // 关键:整代未变
+  expect(h.listOrcaWorkersByLead.mock.calls.length).toBeGreaterThan(1);
+  await act(async () => toggle().click());
+  expect(container.textContent).toContain('w-peer-back');
 });

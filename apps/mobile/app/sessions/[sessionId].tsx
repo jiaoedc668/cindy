@@ -9044,6 +9044,7 @@ export default function SessionScreen() {
             {currentSession?.orcaRole === 'lead' ? (
               <OrcaWorkerStatusCard
                 leadSessionId={sessionId}
+                deviceId={deviceId}
                 maker={maker}
                 onOpenWorker={openWorkerSession}
               />

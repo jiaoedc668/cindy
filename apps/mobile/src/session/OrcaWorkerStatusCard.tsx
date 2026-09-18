@@ -91,8 +91,10 @@ function workersFrom(value: unknown): Worker[] {
   return [];
 }
 
-export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
+export function OrcaWorkerStatusCard({ leadSessionId, deviceId, maker, onOpenWorker }: {
   leadSessionId: string;
+  /** 被控设备 id;用于跟踪该 peer 的在线代次(见下方 unsupported 复位)。 */
+  deviceId: string;
   maker: MobileMakerTransport;
   /**
    * 打开该 Worker 的会话;只读口径由 collaboration.ts 按 orcaRole 判定。
@@ -129,14 +131,20 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
   useEffect(() => {
     setExpanded(false);
   }, [leadSessionId]);
-  // 被控端不支持该 channel 的判定。transport 对象在同一设备断线重连、被控端升级
-  // 重启后保持同一身份,只绑 maker 会让升级后的被控端永远探不回来;因此一并绑到
-  // device-link 的连接代次 connectionEpoch —— 重连即重探一次。失焦再聚焦仍不重探。
-  const { connectionEpoch } = useDeviceLink();
+  // 被控端不支持该 channel 的判定。复位依赖要覆盖「被控端换了个实例」的全部路径:
+  //  - maker:transport 身份变化(换设备/换会话树)。
+  //  - connectionEpoch:本机 controller 重连 relay(整代作废)。
+  //  - peerAvailable:**目标 peer 自身**的在线代次 —— 被控端升级/重启时通常只有它
+  //    自己断连重连,connectionEpoch 不动,光靠它会让 unsupported 永久为真。
+  //    getPresenceAvailability 是「当前 relay 连接代内的逐设备 availability」,
+  //    peer 掉线再上线必然翻转,正是所需的 peer 代次。
+  // 失焦再聚焦不在其中:那不产生新的连接代,不该重探。
+  const { connectionEpoch, getPresenceAvailability } = useDeviceLink();
+  const peerAvailable = getPresenceAvailability(deviceId);
   const [unsupported, setUnsupported] = useState(false);
   useEffect(() => {
     setUnsupported(false);
-  }, [leadSessionId, maker, connectionEpoch]);
+  }, [leadSessionId, maker, connectionEpoch, peerAvailable]);
   const polling = focused && appActive && !unsupported;
   useEffect(() => {
     if (!polling) return;
