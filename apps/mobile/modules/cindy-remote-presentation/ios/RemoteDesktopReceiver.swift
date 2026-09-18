@@ -16,6 +16,7 @@ final class RemoteDesktopReceiver: NSObject, RTCPeerConnectionDelegate, RTCDataC
   var emit: ([String: Any]) -> Void = { _ in }
   var onFrame: (RTCVideoFrame) -> Bool = { _ in false }
   var isPresenting: () -> Bool = { false }
+  var isPresentationAuthorized: () -> Bool = { false }
   private var peer: RTCPeerConnection?
   private var channel: RTCDataChannel?
   private var track: RTCVideoTrack?
@@ -324,7 +325,7 @@ final class RemoteDesktopReceiver: NSObject, RTCPeerConnectionDelegate, RTCDataC
     }
   }
   func replyToViewChallenge() {
-    guard !stopped, isPresenting(), let challenge = pendingViewChallenge,
+    guard !stopped, isPresenting(), isPresentationAuthorized(), let challenge = pendingViewChallenge,
           let channel, channel.readyState == .open else { return }
     if channel.sendData(RTCDataBuffer(data: Data(challenge.utf8), isBinary: false)) {
       pendingViewChallenge = nil

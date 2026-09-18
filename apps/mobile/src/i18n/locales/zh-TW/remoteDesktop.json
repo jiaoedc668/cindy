@@ -11,6 +11,7 @@
   "clipboardSyncSkipped": "目前內容無法同步，已略過。請檢查貼上權限，或複製文字、圖片後重試。",
   "clipboardSyncPermission": "同步已暫停，請允許貼上權限後重試。開關保持開啟。",
   "clipboardSyncRetry": "重試同步",
+  "connectionTakingLong": "連線時間較長，請稍候…",
   "credentialSigningRequired": "Mac 上的開發版缺少簽名設定。請在 Mac 上設定簽名並重新啟動 Cindy，然後重試。",
   "credentialPasswordRejected": "Mac 登入密碼驗證失敗，請重新輸入。",
   "credentialCancelled": "已取消密碼驗證，準備好後可重新連線。",

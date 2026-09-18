@@ -3,12 +3,23 @@ import AVKit
 import WebRTC
 import CoreImage
 
+private final class RemoteDesktopSampleBufferView: UIView {
+  override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
+  var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
+}
+
 /// Native media surface beneath the existing HTML input overlay. HTML supplies
 /// its exact fitted/zoomed rectangle; pixels never cross the React bridge.
 final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelegate,
   AVPictureInPictureSampleBufferPlaybackDelegate {
   let onMessage = EventDispatcher()
+  private let videoSurface = RemoteDesktopSampleBufferView()
+  private var presentationDisplay: AVSampleBufferDisplayLayer { videoSurface.displayLayer }
   private let display = AVSampleBufferDisplayLayer()
+  private let canvas = CALayer()
+  override var backgroundColor: UIColor? {
+    didSet { canvas.backgroundColor = backgroundColor?.cgColor }
+  }
   private let backdrop = CALayer()
   private let backdropContext = CIContext(options: [.cacheIntermediates: false])
   private var backdropActive = false
@@ -21,10 +32,17 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
   private var stableTimer: Timer?
   private var retries = 0
   private var presenting = false
+  private var presentationAuthorized = false
+  private var startingPresentation = false
   var inlineVisible = true {
     didSet {
       updateInlineVisibility()
-      if inlineVisible && !oldValue { refreshBackdrop() }
+      if !inlineVisible { inlineFrameReady = false }
+      if inlineVisible && !oldValue {
+        if let latestFrame { render(latestFrame) }
+        refreshBackdrop()
+      }
+      completeInlineRestoreIfVisible()
     }
   }
   private func updateInlineVisibility() {
@@ -37,13 +55,26 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
   private var automaticPresentation = false
   private var restoreCompletion: ((Bool) -> Void)?
   private var restoreGeneration = 0
+  private var inlineRestoreRequested = false
   private var restoringInterface = false
   private var lastCapability: Bool?
   private var latestFrame: RTCVideoFrame?
+  private var inlineFrameReady = false
+  private var renderedFrames = 0
+  private var playbackReady = false {
+    didSet {
+      guard playbackReady != oldValue else { return }
+      // AVKit caches the sample-buffer delegate's state. Publish the real
+      // transition from no content to live playback, and invalidate on teardown.
+      pip?.invalidatePlaybackState()
+    }
+  }
   private var pool: CVPixelBufferPool?
   private var poolSize = CGSize.zero
+  private var backgroundGeneration = 0
   private var backgroundObserver: NSObjectProtocol?
   private var foregroundObserver: NSObjectProtocol?
+  private var inactiveObserver: NSObjectProtocol?
   private var pipObservation: NSKeyValueObservation?
 
   required init(appContext: AppContext? = nil) {
@@ -51,30 +82,49 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     clipsToBounds = true
     isUserInteractionEnabled = false
     display.videoGravity = .resizeAspect
+    presentationDisplay.videoGravity = .resizeAspect
+    // AVKit keeps a stable viewport-sized projection of the same decoded frame.
+    // The inline layer remains free to follow the viewer's pan/zoom rectangle.
+    addSubview(videoSurface)
+    canvas.backgroundColor = (backgroundColor ?? .systemBackground).cgColor
+    layer.addSublayer(canvas)
     backdrop.opacity = 0.72
     layer.addSublayer(backdrop)
     layer.addSublayer(display)
     if AVPictureInPictureController.isPictureInPictureSupported() {
-      pip = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: display, playbackDelegate: self))
+      pip = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: presentationDisplay, playbackDelegate: self))
       pip?.delegate = self
       pip?.requiresLinearPlayback = true
-      // Armed only after the host has confirmed view-only presentation access.
+      // System readiness is separate from host authorization; challenge replies
+      // remain gated until the host has confirmed view-only access.
       pip?.canStartPictureInPictureAutomaticallyFromInline = false
       pipObservation = pip?.observe(\.isPictureInPicturePossible, options: [.new]) { [weak self] _, _ in
         DispatchQueue.main.async { self?.reportCapability() }
       }
     }
+    inactiveObserver = NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+      guard let self else { return }
+      self.reportPresentationState("willResignActive")
+      // The source scene has already resigned active by this notification,
+      // even when UIApplication still reports .active. A manual start here is
+      // rejected by AVKit and its failure can cancel the automatic handoff.
+      // Automatic entry was armed while inline; let AVKit own this transition.
+    }
     backgroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
       guard let self else { return }
-      if !self.presenting && self.pip?.isPictureInPictureActive != true {
+      self.backgroundGeneration += 1
+      let generation = self.backgroundGeneration
+      self.reportPresentationState("didEnterBackground")
+      if !self.presentationAuthorized || self.pip?.isPictureInPictureActive != true {
         if self.automaticPresentation || self.wantsPresentation {
           // AVKit may finish the automatic transition after background entry.
           // A failed transition must still release media without relying on JS.
           let current = self.receiver
           DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self, weak current] in
             guard let self, let current, self.receiver === current,
+                  self.backgroundGeneration == generation,
                   UIApplication.shared.applicationState != .active,
-                  self.pip?.isPictureInPictureActive != true else { return }
+                  !(self.presentationAuthorized && self.pip?.isPictureInPictureActive == true) else { return }
             self.suspend()
           }
         } else { self.suspend() }
@@ -84,22 +134,27 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
       // JS may not receive the PiP stop callback until foreground. Replay the
       // actual native state so it cannot retain a stale presentation exemption.
       guard let self else { return }
+      self.backgroundGeneration += 1
       if let epoch = self.configuration?["epoch"] as? String {
         self.emit(["type": "presentation", "epoch": epoch, "active": self.presenting])
       }
       self.reportCapability()
+      self.reportPresentationState("didBecomeActive")
+      if self.inlineVisible, let frame = self.latestFrame { self.render(frame) }
       self.refreshBackdrop()
     }
   }
   deinit {
     if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
     if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
+    if let inactiveObserver { NotificationCenter.default.removeObserver(inactiveObserver) }
     retryTimer?.invalidate()
     stableTimer?.invalidate()
     receiver?.stop()
   }
   override func didMoveToWindow() {
     super.didMoveToWindow()
+    reportPresentationState(window == nil ? "sourceDetached" : "sourceAttached")
     if window == nil { stop() }
   }
   func receive(_ message: [String: Any]) {
@@ -116,12 +171,18 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     case "stop": stop()
     case "pipPolicy":
       automaticPresentation = message["enabled"] as? Bool == true
-      wantsPresentation = message["preparing"] as? Bool == true
+      if let preparing = message["preparing"] as? Bool { wantsPresentation = preparing }
+      if let authorized = message["authorized"] as? Bool { presentationAuthorized = authorized }
+      else if !automaticPresentation { presentationAuthorized = false }
       pip?.canStartPictureInPictureAutomaticallyFromInline = automaticPresentation
+      if presentationAuthorized { receiver?.replyToViewChallenge() }
+      reportPresentationState("policy")
     case "restorePresentation":
-      let completion = restoreCompletion
-      restoreCompletion = nil
-      completion?(window != nil)
+      guard restoreCompletion != nil, !inlineRestoreRequested else { return }
+      inlineRestoreRequested = true
+      reportPresentationState("restoreRequested")
+      setNeedsLayout()
+      waitForInlineRestore(generation: restoreGeneration)
     case "videoSettings":
       configuration?.merge(message) { _, new in new }
       retries = 0
@@ -141,12 +202,9 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
       CATransaction.commit()
     case "presentation":
       if message["enabled"] as? Bool == true {
-        guard let pip, pip.isPictureInPicturePossible, latestFrame != nil else {
-          receiver?.post("presentationFailed"); return
-        }
-        wantsPresentation = true
-        pip.startPictureInPicture()
+        startSystemPresentation()
       } else {
+        presentationAuthorized = false
         wantsPresentation = false
         presenting = false
         pip?.stopPictureInPicture()
@@ -159,6 +217,8 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     }
   }
   private func connect() {
+    playbackReady = false
+    inlineFrameReady = false
     retryTimer?.invalidate()
     stableTimer?.invalidate()
     stableTimer = nil
@@ -172,10 +232,12 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     receiver = current
     lastCapability = nil
     current.isPresenting = { [weak self] in self?.presenting == true && self?.pip?.isPictureInPictureActive == true }
+    current.isPresentationAuthorized = { [weak self] in self?.presentationAuthorized == true }
     current.onFrame = { [weak self, weak current] frame in
       guard let self, let current, self.receiver === current else { return false }
       guard self.render(frame, liveFrame: true) else { return false }
       self.latestFrame = frame
+      self.completeInlineRestoreIfVisible()
       self.reportCapability()
       return true
     }
@@ -194,6 +256,8 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
         self.stableTimer = nil
       }
       if event["type"] as? String == "fallback" {
+        self.playbackReady = false
+        self.presentationAuthorized = false
         self.backdropActive = false
         self.backdrop.contents = nil
         self.backdropTime = 0
@@ -221,7 +285,7 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     onMessage(["data": json])
   }
   private func reportCapability() {
-    let supported = pip?.isPictureInPicturePossible == true && latestFrame != nil
+    let supported = pip?.isPictureInPicturePossible == true && playbackReady
     guard supported != lastCapability else { return }
     lastCapability = supported
     receiver?.post("pipCapability", ["supported": supported])
@@ -238,12 +302,17 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     configuration = saved
   }
   private func stop() {
+    playbackReady = false
     // Stop pongs before asynchronous AVKit callbacks, even with JS suspended.
+    presentationAuthorized = false
+    startingPresentation = false
     presenting = false
     updateInlineVisibility()
     wantsPresentation = false
     automaticPresentation = false
     restoringInterface = false
+    inlineRestoreRequested = false
+    restoreGeneration += 1
     pip?.canStartPictureInPictureAutomaticallyFromInline = false
     let completion = restoreCompletion
     restoreCompletion = nil
@@ -257,6 +326,8 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     configuration = nil
     pip?.stopPictureInPicture()
     display.flushAndRemoveImage()
+    presentationDisplay.flushAndRemoveImage()
+    inlineFrameReady = false
     backdropActive = false
     backdrop.contents = nil
     backdropTime = 0
@@ -278,13 +349,31 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
       let entry = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
       CFDictionarySetValue(entry, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(), Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
     }
-    if display.status == .failed { display.flush() }
-    guard display.isReadyForMoreMediaData else { return false }
-    display.enqueue(sample)
+    if presentationDisplay.status == .failed {
+      playbackReady = false
+      presentationDisplay.flush()
+    }
+    let projected = presentationDisplay.isReadyForMoreMediaData
+    if projected {
+      presentationDisplay.enqueue(sample)
+      if liveFrame { playbackReady = true; renderedFrames += 1 }
+    }
+    // The second renderer shares the sample buffer; no second decode or copy.
+    // Only the system projection consumes frames while inline is not visible.
+    let needsInline = inlineVisible && UIApplication.shared.applicationState == .active
+    var renderedInline = false
+    if needsInline {
+      if display.status == .failed { display.flush() }
+      if display.isReadyForMoreMediaData {
+        display.enqueue(sample)
+        inlineFrameReady = true
+        renderedInline = true
+      }
+    }
     // Replaying the last main frame after fallback must not revive its backdrop.
     if liveFrame { backdropActive = true }
     renderBackdrop(buffer)
-    return true
+    return needsInline ? renderedInline : projected
   }
   override func layoutSubviews() {
     super.layoutSubviews()
@@ -292,8 +381,11 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     CATransaction.setDisableActions(true)
     // Match the HTML ambient canvas overscan without moving the main picture.
     backdrop.frame = bounds.insetBy(dx: -bounds.width * 0.06, dy: -bounds.height * 0.06)
+    canvas.frame = bounds
+    videoSurface.frame = bounds
     CATransaction.commit()
     refreshBackdrop()
+    completeInlineRestoreIfVisible()
   }
 
   private func refreshBackdrop() {
@@ -360,35 +452,149 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
     }
     return output
   }
+  private func startSystemPresentation() {
+    guard !startingPresentation, pip?.isPictureInPictureActive != true else { return }
+    guard let pip, pip.isPictureInPicturePossible, playbackReady else {
+      reportPresentationFailure("not-ready")
+      return
+    }
+    guard window?.windowScene?.activationState == .foregroundActive else {
+      reportPresentationFailure("scene-not-active")
+      return
+    }
+    startingPresentation = true
+    wantsPresentation = true
+    reportPresentationState("explicitStart")
+    pip.startPictureInPicture()
+  }
   func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
+    startingPresentation = true
     if automaticPresentation { wantsPresentation = true }
+    reportPresentationState("willStart")
+    receiver?.post("presentationStarting")
   }
   func pictureInPictureControllerDidStartPictureInPicture(_ controller: AVPictureInPictureController) {
-    guard wantsPresentation, receiver != nil else { controller.stopPictureInPicture(); return }
+    startingPresentation = false
+    guard wantsPresentation || automaticPresentation, receiver != nil else {
+      controller.stopPictureInPicture(); return
+    }
     presenting = true
     updateInlineVisibility()
     receiver?.replyToViewChallenge()
     receiver?.post("presentation", ["active": true])
   }
   func pictureInPictureControllerWillStopPictureInPicture(_ controller: AVPictureInPictureController) {
+    reportPresentationState("willStop")
+    presentationAuthorized = false
     wantsPresentation = false
     presenting = false
   }
   func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
+    startingPresentation = false
     updateInlineVisibility()
     receiver?.post("presentation", ["active": false])
     if UIApplication.shared.applicationState != .active && !restoringInterface { suspend() }
     restoringInterface = false
+    // Returning inline keeps live playback running. Refresh the delegate state
+    // after AVKit has finished its PiP stop transition.
+    controller.invalidatePlaybackState()
   }
   func pictureInPictureController(_ controller: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
+    startingPresentation = false
     wantsPresentation = false
     presenting = false
     updateInlineVisibility()
-    receiver?.post("presentationFailed")
+    reportPresentationFailure("avkit", error: error as NSError)
+  }
+  private func sourceVisibility() -> (visible: Bool, opacity: CGFloat) {
+    var visible = true
+    var opacity: CGFloat = 1
+    var ancestor: UIView? = self
+    while let view = ancestor {
+      visible = visible && !view.isHidden
+      opacity *= view.alpha
+      ancestor = view.superview
+    }
+    return (visible, opacity)
+  }
+  private func waitForInlineRestore(generation: Int) {
+    guard restoreGeneration == generation, inlineRestoreRequested, restoreCompletion != nil else { return }
+    completeInlineRestoreIfVisible()
+    guard restoreCompletion != nil else { return }
+    // Parent-only opacity commits need not deliver layout or a new video frame.
+    // This check ends with the existing five-second restore deadline.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+      self?.waitForInlineRestore(generation: generation)
+    }
+  }
+  private func completeInlineRestoreIfVisible() {
+    guard inlineRestoreRequested, let completion = restoreCompletion,
+          inlineVisible, inlineFrameReady, window != nil, !bounds.isEmpty,
+          !display.bounds.isEmpty, !presentationDisplay.bounds.isEmpty,
+          window?.windowScene?.activationState == .foregroundActive else { return }
+    let visibility = sourceVisibility()
+    guard visibility.visible, visibility.opacity >= 0.99 else { return }
+    inlineRestoreRequested = false
+    restoreCompletion = nil
+    reportPresentationState("restoreCompletion")
+    completion(true)
+  }
+  private func reportPresentationState(_ event: String, error: NSError? = nil) {
+    let (visible, opacity) = sourceVisibility()
+    let audio = AVAudioSession.sharedInstance()
+    var fields: [String: Any] = [
+      "event": event, "nativeState": UIApplication.shared.applicationState.rawValue,
+      "sceneState": window?.windowScene?.activationState.rawValue ?? -2,
+      "armed": automaticPresentation, "authorized": presentationAuthorized,
+      "possible": pip?.isPictureInPicturePossible == true,
+      "suspended": pip?.isPictureInPictureSuspended == true,
+      "active": pip?.isPictureInPictureActive == true, "starting": wantsPresentation,
+      "inlineVisible": inlineVisible, "sourceHidden": isHidden,
+      "inWindow": window != nil, "ancestorsVisible": visible, "opacity": opacity,
+      "width": bounds.width, "height": bounds.height,
+      "layerWidth": display.bounds.width, "layerHeight": display.bounds.height,
+      "sourceX": videoSurface.frame.minX, "sourceY": videoSurface.frame.minY,
+      "sourceWidth": videoSurface.bounds.width, "sourceHeight": videoSurface.bounds.height,
+      "surfaceHidden": videoSurface.isHidden, "surfaceOpacity": videoSurface.alpha,
+      "inlineFrameReady": inlineFrameReady, "renderedFrames": renderedFrames,
+      "hasFrame": latestFrame != nil, "playbackReady": playbackReady, "restoring": restoringInterface,
+      "audioCategory": audio.category.rawValue, "audioMode": audio.mode.rawValue,
+      "rtcAudioActive": RTCAudioSession.sharedInstance().isActive,
+      "rtcAudioActivations": RTCAudioSession.sharedInstance().activationCount,
+    ]
+    if let error { fields["domain"] = error.domain; fields["code"] = error.code }
+    receiver?.post("presentationDiagnostic", fields)
+  }
+  private func reportPresentationFailure(_ reason: String, error: NSError? = nil) {
+    var fields: [String: Any] = [
+      "reason": reason, "nativeState": UIApplication.shared.applicationState.rawValue,
+      "sceneState": window?.windowScene?.activationState.rawValue ?? -2,
+      "possible": pip?.isPictureInPicturePossible == true,
+      "active": pip?.isPictureInPictureActive == true, "hasFrame": latestFrame != nil,
+      "armed": automaticPresentation, "authorized": presentationAuthorized,
+    ]
+    fields["rtcAudioActive"] = RTCAudioSession.sharedInstance().isActive
+    fields["rtcAudioActivations"] = RTCAudioSession.sharedInstance().activationCount
+    if let error {
+      fields["domain"] = error.domain; fields["code"] = error.code
+      fields["description"] = String(error.localizedDescription.prefix(400))
+      if let reason = error.localizedFailureReason { fields["failureReason"] = String(reason.prefix(400)) }
+      if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+        fields["underlyingDomain"] = underlying.domain
+        fields["underlyingCode"] = underlying.code
+        fields["underlyingDescription"] = String(underlying.localizedDescription.prefix(400))
+      }
+    }
+    receiver?.post("presentationFailed", fields)
+    presentationAuthorized = false
   }
   func pictureInPictureController(_ controller: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
-    restoreCompletion?(false)
+    let previous = restoreCompletion
+    restoreCompletion = nil
+    inlineRestoreRequested = false
+    previous?(false)
     restoreCompletion = completionHandler
+    inlineRestoreRequested = false
     restoringInterface = true
     restoreGeneration += 1
     let generation = restoreGeneration
@@ -397,16 +603,19 @@ final class RemoteDesktopVideoView: ExpoView, AVPictureInPictureControllerDelega
       guard let self, self.restoreGeneration == generation else { return }
       let completion = self.restoreCompletion
       self.restoreCompletion = nil
+      self.inlineRestoreRequested = false
+      if completion != nil { self.reportPresentationState("restoreTimeout") }
       completion?(false)
     }
   }
   func pictureInPictureController(_ controller: AVPictureInPictureController, setPlaying playing: Bool) {
+    reportPresentationState(playing ? "setPlayingTrue" : "setPlayingFalse")
     if !playing { wantsPresentation = false; presenting = false; controller.stopPictureInPicture() }
   }
   func pictureInPictureControllerTimeRangeForPlayback(_ controller: AVPictureInPictureController) -> CMTimeRange {
-    CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+    playbackReady ? CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity) : .invalid
   }
-  func pictureInPictureControllerIsPlaybackPaused(_ controller: AVPictureInPictureController) -> Bool { false }
+  func pictureInPictureControllerIsPlaybackPaused(_ controller: AVPictureInPictureController) -> Bool { !playbackReady }
   func pictureInPictureController(_ controller: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {}
   func pictureInPictureController(_ controller: AVPictureInPictureController, skipByInterval skipInterval: CMTime, completion: @escaping () -> Void) { completion() }
 }

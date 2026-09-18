@@ -11,6 +11,7 @@
   "clipboardSyncSkipped": "현재 콘텐츠를 동기화할 수 없어 건너뛰었습니다. 붙여넣기 권한을 확인하거나 텍스트 또는 이미지를 복사한 후 다시 시도해 주세요.",
   "clipboardSyncPermission": "동기화가 일시 중지되었습니다. 붙여넣기를 허용한 후 다시 시도해 주세요. 설정은 켜진 상태로 유지됩니다.",
   "clipboardSyncRetry": "동기화 재시도",
+  "connectionTakingLong": "연결에 평소보다 시간이 걸리고 있어요…",
   "credentialSigningRequired": "Mac 개발 버전에 서명 설정이 없습니다. Mac에서 서명을 설정하고 Cindy를 다시 시작한 후 다시 시도해 주세요.",
   "credentialPasswordRejected": "Mac 로그인 암호를 확인하지 못했습니다. 다시 입력해 주세요.",
   "credentialCancelled": "암호 확인을 취소했습니다. 준비되면 다시 연결해 주세요.",

@@ -22,6 +22,10 @@ import {
   View,
   useWindowDimensions,
 } from "react-native";
+import Animated from "react-native-reanimated";
+import { Monitor } from "lucide-react-native";
+import { useReduceMotionEnabled } from "@/hooks/useReduceMotion";
+import { motionDuration } from "@/theme/tokens";
 import {
   Stack,
   useLocalSearchParams,
@@ -61,6 +65,7 @@ import {
   type RemoteDesktopDisplayMode,
 } from "@cindy/device-link";
 import { useDeviceLink } from "@/device-link/DeviceLinkContext";
+import { BACKGROUND_TRANSITION_TIMEOUT_MS } from "@/device-link/backgroundConnection";
 import { useAuth } from "@/auth/AuthContext";
 import { DEVICE_LINK_API_BASE_URL } from "@/config/env";
 import {
@@ -273,6 +278,10 @@ export function RemoteDesktopSession({
   // this to retry a release or restore local control instead of ignoring host-true.
   const pendingHostControl = useRef<boolean | null>(null);
   const controlInFlight = useRef(false);
+  const controlRestoration = useRef<Promise<void> | null>(null);
+  // Revoking background permission must not lose the pending fullscreen input restore.
+  const restoreAfterPipDisabled = useRef(false);
+  const finishBackgroundTransition = useRef<(() => void) | null>(null);
   const recovery = useRef({
     enabled: true,
     at: 0,
@@ -330,11 +339,25 @@ export function RemoteDesktopSession({
       );
   }, [error, t]);
   const [frameReady, setFrameReady] = useState(false);
+  const reduceMotion = useReduceMotionEnabled();
+  const mediaReveal = {
+    opacity: frameReady ? 1 : 0,
+    transitionProperty: "opacity" as const,
+    transitionDuration:
+      frameReady && reduceMotion === false ? motionDuration.fast : 0,
+  };
   const [controlReady, setControlReady] = useState(false);
   const connectionPending = !error && (!lease || !frameReady || !controlReady);
   const showConnectionStatus =
     !isLeaving && (connectionPending || (!error && status === "reconnecting"));
   const showExitLockStatus = isLeaving && exitLockPending;
+  const [connectionTakingLong, setConnectionTakingLong] = useState(false);
+  useEffect(() => {
+    setConnectionTakingLong(false);
+    if (frameReady || !showConnectionStatus) return;
+    const timer = setTimeout(() => setConnectionTakingLong(true), 8000);
+    return () => clearTimeout(timer);
+  }, [frameReady, showConnectionStatus, deviceId]);
   const connectionLabel = t(
     showExitLockStatus
       ? "remoteDesktop.lockingOnExit"
@@ -376,6 +399,7 @@ export function RemoteDesktopSession({
   );
   const pendingPresentation = useRef<((active: boolean) => void) | null>(null);
   const presentationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const presentationReturnedToActive = useRef(false);
   const [showMouseButtons, setShowMouseButtons] = useMouseButtonsPreference();
   const [keyboard, setKeyboard] = useState(false);
   const [fullKeys, setFullKeys] = useState(false);
@@ -617,6 +641,7 @@ export function RemoteDesktopSession({
       presentation.current = false;
       actualPresentation.current = false;
       pipPrepared.current = false;
+      restoreAfterPipDisabled.current = false;
       presentationGeneration.current++;
       settingInFlight.current = false;
       pendingPresentation.current?.(false);
@@ -627,6 +652,9 @@ export function RemoteDesktopSession({
       connecting.current = false;
       pendingHostControl.current = null;
       controlInFlight.current = false;
+      controlRestoration.current = null;
+      finishBackgroundTransition.current?.();
+      finishBackgroundTransition.current = null;
       const previous = active.current;
       setExitLockPending(Boolean(previous && exiting && exitLock.current));
       active.current = null;
@@ -796,7 +824,7 @@ export function RemoteDesktopSession({
     if (controlInFlight.current) return;
     controlInFlight.current = true;
     pendingHostControl.current = enabled;
-    void request<{ controlling: boolean }>({
+    return request<{ controlling: boolean }>({
       op: "control",
       lease: current.lease,
       enabled,
@@ -819,26 +847,41 @@ export function RemoteDesktopSession({
     if (
       !NativeRemoteDesktopView ||
       !current ||
-      !pipPrepared.current ||
+      (!pipPrepared.current && !restoreAfterPipDisabled.current) ||
       presentation.current ||
       actualPresentation.current ||
       !focusedRef.current ||
+      linkRef.current.status !== "online" ||
       AppState.currentState !== "active"
     )
       return;
     pipPrepared.current = false;
-    send({ type: "pipPolicy", enabled: false });
+    restoreAfterPipDisabled.current = false;
+    send({
+      type: "pipPolicy",
+      enabled: pipEnabledRef.current && frameReady,
+      authorized: false,
+    });
     // Returning to a visible viewer restores the user's previous input mode
     // through the host's normal authorization path, never by a local override.
-    if (wantsControl.current) requestHostControlRef.current(current, true);
-    else
-      void request({
-        op: "presentation",
-        lease: current.lease,
-        enabled: false,
-      }).catch((cause) => {
-        if (active.current === current) fail(cause);
+    const restoration = wantsControl.current
+      ? requestHostControlRef.current(current, true)
+      : request({
+          op: "presentation",
+          lease: current.lease,
+          enabled: false,
+        })
+          .then(() => {})
+          .catch((cause) => {
+            if (active.current === current) fail(cause);
+          });
+    if (restoration) {
+      controlRestoration.current = restoration;
+      void restoration.finally(() => {
+        if (controlRestoration.current === restoration)
+          controlRestoration.current = null;
       });
+    }
   };
   const restoreInlinePresentationRef = useRef(restoreInlinePresentation);
   restoreInlinePresentationRef.current = restoreInlinePresentation;
@@ -1109,6 +1152,7 @@ export function RemoteDesktopSession({
     alive.current = true;
     const subscription = AppState.addEventListener("change", (state) => {
       setAppState(state);
+      if (state === "active") presentationReturnedToActive.current = true;
       // iOS enters inactive during an interrupted Home gesture or a system
       // overlay. Release held input, but keep this viewer's lease and stream.
       if (state === "inactive") {
@@ -1119,7 +1163,7 @@ export function RemoteDesktopSession({
           pipEnabledRef.current &&
           NativeRemoteDesktopView &&
           !presentation.current &&
-          !pipPrepared.current
+          !settingInFlight.current
         )
           void startPresentationRef.current(false);
       } else if (
@@ -1165,6 +1209,9 @@ export function RemoteDesktopSession({
       if (
         !current ||
         heartbeatBusy === current.lease ||
+        (NativeRemoteDesktopView &&
+          pipPrepared.current &&
+          linkRef.current.status !== "online") ||
         (presentation.current && AppState.currentState !== "active")
       )
         return;
@@ -1402,8 +1449,16 @@ export function RemoteDesktopSession({
     t,
   ]);
   useEffect(() => {
-    if (link.status !== "online" && !presentation.current) pause();
-    else if (!active.current) void connectRef.current();
+    if (link.status !== "online") {
+      // A native stream with an acknowledged background lease outlives signaling.
+      // Restoring fullscreen must not tear it down while that socket reconnects.
+      if (
+        !presentation.current &&
+        !(NativeRemoteDesktopView && pipPrepared.current)
+      )
+        pause();
+    } else if (!active.current) void connectRef.current();
+    else restoreInlinePresentationRef.current();
   }, [link.status, pause]);
 
   const onMessage = (
@@ -1488,7 +1543,68 @@ export function RemoteDesktopSession({
       case "pipCapability":
         setCanPip(message.supported === true);
         break;
+      case "presentationDiagnostic":
+        mobileDebugLog(
+          "info",
+          "lifecycle",
+          "remote desktop native presentation diagnostic",
+          {
+            event: message.event,
+            domain: message.domain,
+            code: message.code,
+            nativeState: message.nativeState,
+            sceneState: message.sceneState,
+            armed: message.armed,
+            authorized: message.authorized,
+            possible: message.possible,
+            active: message.active,
+            suspended: message.suspended,
+            starting: message.starting,
+            inlineVisible: message.inlineVisible,
+            sourceHidden: message.sourceHidden,
+            inWindow: message.inWindow,
+            ancestorsVisible: message.ancestorsVisible,
+            opacity: message.opacity,
+            width: message.width,
+            height: message.height,
+            layerWidth: message.layerWidth,
+            layerHeight: message.layerHeight,
+            sourceX: message.sourceX,
+            sourceY: message.sourceY,
+            sourceWidth: message.sourceWidth,
+            sourceHeight: message.sourceHeight,
+            surfaceHidden: message.surfaceHidden,
+            surfaceOpacity: message.surfaceOpacity,
+            hasFrame: message.hasFrame,
+            playbackReady: message.playbackReady,
+            inlineFrameReady: message.inlineFrameReady,
+            renderedFrames: message.renderedFrames,
+            restoring: message.restoring,
+            audioCategory: message.audioCategory,
+            audioMode: message.audioMode,
+            rtcAudioActive: message.rtcAudioActive,
+            rtcAudioActivations: message.rtcAudioActivations,
+          },
+        );
+        break;
+      case "presentationStarting":
+        if (
+          pipEnabledRef.current &&
+          !presentation.current &&
+          !settingInFlight.current
+        )
+          void startPresentationRef.current(false);
+        break;
       case "presentation":
+        // AVKit can start before the Home AppState event / host acknowledgement.
+        if (
+          NativeRemoteDesktopView &&
+          message.active === true &&
+          pipEnabledRef.current &&
+          !presentation.current &&
+          !settingInFlight.current
+        )
+          void startPresentationRef.current(false);
         mobileDebugLog(
           "info",
           "lifecycle",
@@ -1501,12 +1617,36 @@ export function RemoteDesktopSession({
             appState: AppState.currentState,
           },
         );
-        if (presentationTimer.current) clearTimeout(presentationTimer.current);
-        presentationTimer.current = null;
+        const authorized = !NativeRemoteDesktopView || pipPrepared.current;
+        if (
+          NativeRemoteDesktopView &&
+          message.active !== true &&
+          actualPresentation.current &&
+          !pipPrepared.current &&
+          presentationTimer.current !== null &&
+          settingInFlight.current &&
+          (AppState.currentState !== "active" || !focusedRef.current)
+        ) {
+          // A window closed before its host handoff completed. Retire the lease
+          // so a late ACK cannot leave the host in background-viewing mode.
+          pause(!focusedRef.current);
+          if (!focusedRef.current) navigation.current.onEnded?.();
+          break;
+        }
+        if (
+          (message.active !== true &&
+            actualPresentation.current &&
+            !settingInFlight.current) ||
+          authorized
+        ) {
+          if (presentationTimer.current)
+            clearTimeout(presentationTimer.current);
+          presentationTimer.current = null;
+          pendingPresentation.current?.(message.active === true && authorized);
+          pendingPresentation.current = null;
+        }
         presentation.current = message.active === true;
         actualPresentation.current = presentation.current;
-        pendingPresentation.current?.(presentation.current);
-        pendingPresentation.current = null;
         if (presentation.current && !focusedRef.current)
           navigation.current.onVisibility?.(false);
         if (
@@ -1531,13 +1671,18 @@ export function RemoteDesktopSession({
         }
         break;
       case "presentationRestore":
-        mobileDebugLog("info", "lifecycle", "remote desktop native restore requested", {
-          focused: focusedRef.current,
-          pipActive: actualPresentation.current,
-          restoring: restoringPresentation.current,
-          inlineVisible: message.inlineVisible === true,
-          sourceHidden: message.sourceHidden === true,
-        });
+        mobileDebugLog(
+          "info",
+          "lifecycle",
+          "remote desktop native restore requested",
+          {
+            focused: focusedRef.current,
+            pipActive: actualPresentation.current,
+            restoring: restoringPresentation.current,
+            inlineVisible: message.inlineVisible === true,
+            sourceHidden: message.sourceHidden === true,
+          },
+        );
         restoringPresentation.current = true;
         navigation.current.onVisibility?.(true);
         if (focusedRef.current) {
@@ -1546,6 +1691,8 @@ export function RemoteDesktopSession({
         } else navigation.current.onRestore?.();
         break;
       case "presentationFailed":
+        presentationGeneration.current++;
+        settingInFlight.current = false;
         mobileDebugLog(
           "warn",
           "lifecycle",
@@ -1553,6 +1700,23 @@ export function RemoteDesktopSession({
           {
             focused: focusedRef.current,
             appState: AppState.currentState,
+            reason: message.reason,
+            description: message.description,
+            failureReason: message.failureReason,
+            underlyingDomain: message.underlyingDomain,
+            underlyingCode: message.underlyingCode,
+            underlyingDescription: message.underlyingDescription,
+            rtcAudioActive: message.rtcAudioActive,
+            rtcAudioActivations: message.rtcAudioActivations,
+            domain: message.domain,
+            code: message.code,
+            nativeState: message.nativeState,
+            sceneState: message.sceneState,
+            possible: message.possible,
+            active: message.active,
+            authorized: message.authorized,
+            armed: message.armed,
+            hasFrame: message.hasFrame,
           },
         );
         presentation.current = false;
@@ -1868,12 +2032,13 @@ export function RemoteDesktopSession({
   nativeMessage.current = onMessage;
   const startPresentation = async (enter = true) => {
     const current = active.current;
+    const restoration = controlRestoration.current;
     if (
       !current ||
       !caps?.backgroundViewing ||
-      !canPip ||
+      (NativeRemoteDesktopView ? !frameReady : !canPip) ||
       !remotePresentation ||
-      controlInFlight.current ||
+      (controlInFlight.current && !restoration) ||
       settingInFlight.current
     ) {
       pendingPresentation.current?.(false);
@@ -1882,21 +2047,39 @@ export function RemoteDesktopSession({
     }
     settingInFlight.current = true;
     const startedAt = performance.now();
+    const alreadyAuthorized = Boolean(
+      NativeRemoteDesktopView && pipPrepared.current && !restoration,
+    );
+    const finishTransition = linkRef.current.beginBackgroundTransition?.();
+    finishBackgroundTransition.current = finishTransition ?? null;
+    presentationReturnedToActive.current = false;
     setSettingNotice(null);
     const transition = ++presentationGeneration.current;
     const currentTransition = () =>
       active.current === current &&
       presentationGeneration.current === transition;
-    if (enter || AppState.currentState !== "active") {
-      // Protect the Home transition before the asynchronous host handoff starts.
-      // Native keeps only a bounded grace period, and cannot renew the lease
-      // until AVKit starts after the host has confirmed view-only.
-      presentation.current = true;
-      send({ type: "pipPolicy", enabled: false, preparing: true });
-    }
+    // Reserve this bounded transition immediately, including native willStart
+    // arriving before JS sees inactive. System readiness is not host permission.
+    presentation.current = true;
+    send({
+      type: "pipPolicy",
+      enabled: pipEnabledRef.current,
+      preparing: true,
+      authorized: alreadyAuthorized,
+    });
     if (presentationTimer.current) clearTimeout(presentationTimer.current);
     presentationTimer.current = setTimeout(() => {
       if (!currentTransition()) return;
+      mobileDebugLog(
+        "warn",
+        "lifecycle",
+        "remote desktop presentation deadline",
+        {
+          elapsedMs: Math.round(performance.now() - startedAt),
+          active: actualPresentation.current,
+          authorized: pipPrepared.current,
+        },
+      );
       pendingPresentation.current?.(false);
       pendingPresentation.current = null;
       setSettingNotice(t("remoteDesktop.pipUnavailable"));
@@ -1904,15 +2087,20 @@ export function RemoteDesktopSession({
       setOperations(true);
       pause(!focusedRef.current);
       if (!focusedRef.current) navigation.current.onEnded?.();
-    }, 4000);
+    }, BACKGROUND_TRANSITION_TIMEOUT_MS);
     try {
+      // Finish foreground restoration before asking the host to release input
+      // again; a late control grant must never overtake background authorization.
+      if (restoration) await restoration;
+      if (!currentTransition()) return;
       await remotePresentation.playback(true);
       if (!currentTransition()) return;
-      await request({
-        op: "presentation",
-        lease: current.lease,
-        enabled: true,
-      });
+      if (!alreadyAuthorized)
+        await request({
+          op: "presentation",
+          lease: current.lease,
+          enabled: true,
+        });
       if (!currentTransition()) return;
       mobileDebugLog(
         "info",
@@ -1921,6 +2109,7 @@ export function RemoteDesktopSession({
         {
           elapsedMs: Math.round(performance.now() - startedAt),
           enter,
+          reused: alreadyAuthorized,
           appState: AppState.currentState,
         },
       );
@@ -1933,8 +2122,23 @@ export function RemoteDesktopSession({
       setKeyboard(false);
       setLease({ ...current });
       pipPrepared.current = true;
-      send({ type: "pipPolicy", enabled: pipEnabledRef.current });
-      if (!enter && AppState.currentState !== "background") {
+      send({
+        type: "pipPolicy",
+        enabled: pipEnabledRef.current,
+        authorized: true,
+      });
+      if (actualPresentation.current) {
+        if (presentationTimer.current) clearTimeout(presentationTimer.current);
+        presentationTimer.current = null;
+        pendingPresentation.current?.(true);
+        pendingPresentation.current = null;
+      }
+      if (
+        !enter &&
+        presentationReturnedToActive.current &&
+        AppState.currentState === "active" &&
+        !actualPresentation.current
+      ) {
         presentation.current = actualPresentation.current;
         if (presentationTimer.current) clearTimeout(presentationTimer.current);
         presentationTimer.current = null;
@@ -1943,7 +2147,10 @@ export function RemoteDesktopSession({
       }
       presentation.current = true;
       setOperations(false);
-      send({ type: "presentation", enabled: true });
+      // Automatic Home entry is already armed; never attempt a late manual
+      // start from background. Explicit in-app Back still requests AVKit here.
+      if (enter && !actualPresentation.current)
+        send({ type: "presentation", enabled: true });
     } catch {
       if (!currentTransition()) return;
       pendingPresentation.current?.(false);
@@ -1956,12 +2163,35 @@ export function RemoteDesktopSession({
       pause(!focusedRef.current);
       if (!focusedRef.current) navigation.current.onEnded?.();
     } finally {
+      finishTransition?.();
+      if (finishBackgroundTransition.current === finishTransition)
+        finishBackgroundTransition.current = null;
       if (presentationGeneration.current === transition)
         settingInFlight.current = false;
       if (alive.current) setSettingsRevision((value) => value + 1);
     }
   };
   startPresentationRef.current = startPresentation;
+  useEffect(() => {
+    if (!NativeRemoteDesktopView || !lease) return;
+    send({
+      type: "pipPolicy",
+      enabled:
+        pipEnabled &&
+        frameReady &&
+        caps?.backgroundViewing === true &&
+        !settingBusy,
+    });
+  }, [
+    pipEnabled,
+    frameReady,
+    caps?.backgroundViewing,
+    settingBusy,
+    settingsRevision,
+    lease?.lease,
+    lease?.controlling,
+    send,
+  ]);
   const togglePictureInPicture = () => {
     const enabled = !pipEnabledRef.current;
     pipEnabledRef.current = enabled;
@@ -1977,6 +2207,8 @@ export function RemoteDesktopSession({
       presentationGeneration.current++;
       send({ type: "pipPolicy", enabled: false });
       send({ type: "presentation", enabled: false });
+      restoreAfterPipDisabled.current ||= pipPrepared.current;
+      pipPrepared.current = false;
       const current = active.current;
       if (current)
         void request({
@@ -2236,54 +2468,64 @@ export function RemoteDesktopSession({
             { marginLeft: landscape ? 0 : edgePadding.paddingLeft },
           ]}
         >
-          {NativeRemoteDesktopView && (
-            <NativeRemoteDesktopView
-              ref={nativeViewer}
-              inlineVisible={focused}
-              onMessage={(event) => nativeMessage.current(event)}
-              pointerEvents="none"
-              style={StyleSheet.absoluteFill}
+          <Animated.View
+            testID="remoteDesktop.media"
+            pointerEvents={frameReady ? "auto" : "none"}
+            style={[StyleSheet.absoluteFill, mediaReveal]}
+          >
+            {NativeRemoteDesktopView && (
+              <NativeRemoteDesktopView
+                ref={nativeViewer}
+                inlineVisible={focused}
+                onMessage={(event) => nativeMessage.current(event)}
+                pointerEvents="none"
+                style={[
+                  StyleSheet.absoluteFill,
+                  { backgroundColor: colors.surface },
+                ]}
+              />
+            )}
+            <WebView
+              ref={webview}
+              source={{ html, baseUrl: "https://cindy-desktop.invalid/" }}
+              originWhitelist={["*"]}
+              onShouldStartLoadWithRequest={(request) =>
+                request.url === "about:blank" ||
+                request.url === "https://cindy-desktop.invalid/"
+              }
+              onMessage={onMessage}
+              onError={restartViewer}
+              onContentProcessDidTerminate={restartViewer}
+              onRenderProcessGone={restartViewer}
+              keyboardDisplayRequiresUserAction={false}
+              hideKeyboardAccessoryView
+              textInteractionEnabled={false}
+              allowsLinkPreview={false}
+              {...(Platform.OS === "ios"
+                ? { dataDetectorTypes: "none" as const }
+                : {})}
+              javaScriptEnabled
+              allowsInlineMediaPlayback
+              mediaPlaybackRequiresUserAction={false}
+              allowsPictureInPictureMediaPlayback
+              scrollEnabled={false}
+              contentInsetAdjustmentBehavior="never"
+              bounces={false}
+              allowFileAccess={false}
+              allowUniversalAccessFromFileURLs={false}
+              allowFileAccessFromFileURLs={false}
+              setSupportMultipleWindows={false}
+              javaScriptCanOpenWindowsAutomatically={false}
+              mixedContentMode="never"
+              style={[
+                styles.webview,
+                NativeRemoteDesktopView && { backgroundColor: "transparent" },
+              ]}
+              testID="remoteDesktop.viewer"
             />
-          )}
-          <WebView
-            ref={webview}
-            source={{ html, baseUrl: "https://cindy-desktop.invalid/" }}
-            originWhitelist={["*"]}
-            onShouldStartLoadWithRequest={(request) =>
-              request.url === "about:blank" ||
-              request.url === "https://cindy-desktop.invalid/"
-            }
-            onMessage={onMessage}
-            onError={restartViewer}
-            onContentProcessDidTerminate={restartViewer}
-            onRenderProcessGone={restartViewer}
-            keyboardDisplayRequiresUserAction={false}
-            hideKeyboardAccessoryView
-            textInteractionEnabled={false}
-            allowsLinkPreview={false}
-            {...(Platform.OS === "ios"
-              ? { dataDetectorTypes: "none" as const }
-              : {})}
-            javaScriptEnabled
-            allowsInlineMediaPlayback
-            mediaPlaybackRequiresUserAction={false}
-            allowsPictureInPictureMediaPlayback
-            scrollEnabled={false}
-            contentInsetAdjustmentBehavior="never"
-            bounces={false}
-            allowFileAccess={false}
-            allowUniversalAccessFromFileURLs={false}
-            allowFileAccessFromFileURLs={false}
-            setSupportMultipleWindows={false}
-            javaScriptCanOpenWindowsAutomatically={false}
-            mixedContentMode="never"
-            style={[
-              styles.webview,
-              NativeRemoteDesktopView && { backgroundColor: "transparent" },
-            ]}
-            testID="remoteDesktop.viewer"
-          />
-          {Platform.OS === "ios" &&
+          </Animated.View>
+          {frameReady &&
+            Platform.OS === "ios" &&
             showMouseButtons &&
             focused &&
             !operations &&
@@ -2314,7 +2556,12 @@ export function RemoteDesktopSession({
               pointerEvents="box-none"
               style={[
                 styles.connectionStatus,
-                { top: edgePadding.paddingTop + spacing.xs + 44 + spacing.lg },
+                !frameReady && error !== "permissionHint"
+                  ? styles.initialConnection
+                  : {
+                      top:
+                        edgePadding.paddingTop + spacing.xs + 44 + spacing.lg,
+                    },
                 error === "permissionHint" && {
                   bottom:
                     (landscape ? insets.bottom : toolbarSize.height) +
@@ -2323,16 +2570,43 @@ export function RemoteDesktopSession({
                 },
               ]}
             >
+              {!frameReady && error !== "permissionHint" && (
+                <View style={styles.waitingComputer}>
+                  <Monitor
+                    size={iconSize.lg}
+                    strokeWidth={iconStroke.regular}
+                    color={colors.textTertiary}
+                  />
+                  <Text numberOfLines={2} style={styles.waitingComputerName}>
+                    {deviceName}
+                  </Text>
+                </View>
+              )}
               {showConnectionStatus || showExitLockStatus ? (
                 <View
-                  style={styles.connectionBadge}
+                  style={[
+                    styles.connectionBadge,
+                    !frameReady && styles.initialConnectionBadge,
+                  ]}
                   accessibilityRole="progressbar"
                   accessibilityLabel={connectionLabel}
                   accessibilityState={{ busy: true }}
                   testID="remoteDesktop.connectingStatus"
                 >
-                  <ActivityIndicator size="small" color={colors.textPrimary} />
-                  <Text style={styles.connectionLabel}>{connectionLabel}</Text>
+                  {reduceMotion === false && (
+                    <ActivityIndicator
+                      size="small"
+                      color={colors.textSecondary}
+                    />
+                  )}
+                  <Text
+                    style={[
+                      styles.connectionLabel,
+                      !frameReady && styles.waitingLabel,
+                    ]}
+                  >
+                    {connectionLabel}
+                  </Text>
                 </View>
               ) : (
                 error !== "permissionHint" && (
@@ -2347,6 +2621,11 @@ export function RemoteDesktopSession({
                     )}
                   </Text>
                 )
+              )}
+              {!frameReady && showConnectionStatus && connectionTakingLong && (
+                <Text style={styles.waitingLabel}>
+                  {t("remoteDesktop.connectionTakingLong")}
+                </Text>
               )}
               {error &&
                 error !== "permissionHint" &&
@@ -2429,7 +2708,9 @@ export function RemoteDesktopSession({
                 }
                 caption={`${deviceName} · ${showConnectionStatus ? connectionLabel : t(`remoteDesktop.${status}`)}`}
                 onClose={() => setOperations(false)}
-                footer={<RemoteDesktopDisconnect onPress={() => void leave()} />}
+                footer={
+                  <RemoteDesktopDisconnect onPress={() => void leave()} />
+                }
               >
                 <RemoteDesktopControls
                   page={controlPage}
@@ -2519,10 +2800,14 @@ export function RemoteDesktopSession({
           )}
         </View>
         {!keyboard && (
-          <View
+          <Animated.View
             key={landscape ? "landscape-toolbar" : "portrait-toolbar"}
             testID="remoteDesktop.toolbarPosition"
-            pointerEvents="box-none"
+            pointerEvents={frameReady ? "box-none" : "none"}
+            accessibilityElementsHidden={!frameReady}
+            importantForAccessibility={
+              frameReady ? "auto" : "no-hide-descendants"
+            }
             onLayout={({ nativeEvent: { layout } }) => {
               setToolbarSize((previous) =>
                 previous.width === layout.width &&
@@ -2533,6 +2818,7 @@ export function RemoteDesktopSession({
             }}
             style={[
               styles.floatingToolbar,
+              mediaReveal,
               landscape ? styles.floatingRail : styles.floatingBottom,
               {
                 paddingRight: landscape ? spacing.xs : edgePadding.paddingRight,
@@ -2598,7 +2884,7 @@ export function RemoteDesktopSession({
                 setOperations(!operations);
               }}
             />
-          </View>
+          </Animated.View>
         )}
       </View>
       <View
@@ -2897,6 +3183,34 @@ const makeStyles = (colors: ThemeColors) =>
       left: spacing.md,
       right: spacing.md,
       gap: spacing.sm,
+    },
+    initialConnection: {
+      top: 0,
+      bottom: 0,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    waitingComputer: {
+      alignItems: "center",
+      gap: spacing.md,
+      paddingHorizontal: spacing.lg,
+    },
+    waitingComputerName: {
+      color: colors.textPrimary,
+      fontSize: typeScale.body,
+      fontWeight: fontWeight.semibold,
+      textAlign: "center",
+    },
+    initialConnectionBadge: {
+      backgroundColor: "transparent",
+      paddingHorizontal: 0,
+      paddingVertical: spacing.xs,
+    },
+    waitingLabel: {
+      color: colors.textSecondary,
+      fontSize: typeScale.caption,
+      fontWeight: fontWeight.regular,
+      textAlign: "center",
     },
     connectionBadge: {
       alignSelf: "center",

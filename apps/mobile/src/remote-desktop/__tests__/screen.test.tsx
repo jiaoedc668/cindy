@@ -16,6 +16,11 @@ import { AppState } from "react-native";
 import { goBackGuarded } from "@/utils/backGuard";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+vi.mock("react-native-reanimated", async () => {
+  const { View } = await import("react-native");
+  return { default: { View } };
+});
+
 vi.mock("../useAutoUnlockSettings", () => ({
   useAutoUnlockSettings: (
     _target: string,
@@ -83,6 +88,8 @@ const fixture = vi.hoisted(() => ({
   keyboardListeners: {} as Record<string, (event: unknown) => void>,
   views: {} as Record<string, any>,
   invoke: vi.fn(),
+  finishBackgroundTransition: vi.fn(),
+  beginBackgroundTransition: vi.fn(),
   apiFetch: vi.fn(),
   openLink: vi.fn(),
   post: vi.fn(),
@@ -292,6 +299,7 @@ vi.mock("@/device-link/DeviceLinkContext", () => ({
   useDeviceLink: () => ({
     status: fixture.status,
     invoke: fixture.invoke,
+    beginBackgroundTransition: fixture.beginBackgroundTransition,
     openLink: fixture.openLink,
   }),
 }));
@@ -329,7 +337,9 @@ vi.mock("../NativeRemoteDesktopView", async (importOriginal) => {
       receive: fixture.nativeReceive,
       sendInput: fixture.nativeInput,
     }));
-    return createElement("div", { "data-native-inline": String(props.inlineVisible) });
+    return createElement("div", {
+      "data-native-inline": String(props.inlineVisible),
+    });
   });
   return {
     ...actual,
@@ -354,6 +364,9 @@ beforeEach(async () => {
   await AsyncStorage.removeItem("cindy.mobile.remote-desktop.audio.v1");
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   vi.clearAllMocks();
+  fixture.beginBackgroundTransition.mockImplementation(
+    () => fixture.finishBackgroundTransition,
+  );
   fixture.nativeMedia = false;
   fixture.pipEnabled = false;
   fixture.nativeReceive.mockReset().mockResolvedValue(undefined);
@@ -547,6 +560,145 @@ describe("remote desktop controls", () => {
     });
     return { ...callbacks, render };
   };
+  it("arms automatic native PiP in foreground without releasing control", async () => {
+    fixture.nativeMedia = true;
+    act(() => root.render(<RemoteDesktopScreen />));
+    await connect();
+    await nativePresentation("pipCapability", { supported: true });
+    act(() => button("operations").click());
+    await act(async () => button("smallWindow").click());
+    expect(sent()).toContainEqual(
+      expect.objectContaining({ type: "pipPolicy", enabled: true }),
+    );
+    expect(requests().filter((r) => r.op === "presentation")).toHaveLength(0);
+    expect(
+      requests()
+        .filter((r) => r.op === "control")
+        .at(-1),
+    ).toMatchObject({ enabled: true });
+  });
+
+  it("does not confuse a fast native Home handoff with a cancelled gesture", async () => {
+    fixture.nativeMedia = true;
+    act(() => root.render(<RemoteDesktopScreen />));
+    await connect();
+    await nativePresentation("pipCapability", { supported: true });
+    act(() => button("operations").click());
+    await act(async () => button("smallWindow").click());
+    const controls = requests().filter((r) => r.op === "control").length;
+    await nativePresentation("presentationStarting");
+    expect(
+      sent()
+        .filter((m) => m.type === "pipPolicy" && "authorized" in m)
+        .at(-1),
+    ).toMatchObject({ authorized: true });
+    expect(requests().filter((r) => r.op === "control")).toHaveLength(controls);
+    await act(async () => {
+      AppState.currentState = "inactive";
+      fixture.appState!("inactive");
+      AppState.currentState = "background";
+      fixture.appState!("background");
+    });
+    await nativePresentation("presentation", { active: true });
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+    expect(
+      requests().filter((r) => r.op === "presentation" && r.enabled),
+    ).toHaveLength(1);
+  });
+
+  it.each(["grant", "timeout", "reject", "close"])(
+    "keeps authorization bounded when native PiP starts before the host reply: %s",
+    async (outcome) => {
+      fixture.nativeMedia = true;
+      act(() => root.render(<RemoteDesktopScreen />));
+      await connect();
+      await nativePresentation("pipCapability", { supported: true });
+      act(() => button("operations").click());
+      await act(async () => button("smallWindow").click());
+      let grant!: (value: unknown) => void;
+      let reject!: (cause: Error) => void;
+      const original = fixture.invoke.getMockImplementation()!;
+      fixture.invoke.mockImplementation((...args) =>
+        args[2][0].op === "presentation" && args[2][0].enabled
+          ? new Promise((resolve, fail) => {
+              grant = resolve;
+              reject = fail;
+            })
+          : original(...args),
+      );
+      // willStart may precede JS inactive; a second event must not duplicate auth.
+      await nativePresentation("presentationStarting");
+      expect(fixture.beginBackgroundTransition).toHaveBeenCalledTimes(1);
+      expect(fixture.finishBackgroundTransition).not.toHaveBeenCalled();
+      await act(async () => {
+        AppState.currentState = "inactive";
+        fixture.appState!("inactive");
+      });
+      await nativePresentation("presentation", { active: true });
+      await act(async () => {
+        AppState.currentState = "background";
+        fixture.appState!("background");
+        await vi.advanceTimersByTimeAsync(800);
+      });
+      expect(
+        requests().filter((r) => r.op === "presentation" && r.enabled),
+      ).toHaveLength(1);
+      expect(
+        sent().filter((m) => m.type === "pipPolicy" && m.authorized),
+      ).toHaveLength(0);
+      if (outcome === "grant") {
+        await act(async () => grant({}));
+        expect(sent()).toContainEqual(
+          expect.objectContaining({ type: "pipPolicy", authorized: true }),
+        );
+        expect(
+          sent().filter((m) => m.type === "presentation" && m.enabled),
+        ).toHaveLength(0);
+        await act(async () => vi.advanceTimersByTimeAsync(5000));
+        expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+      } else {
+        if (outcome === "timeout")
+          await act(async () => vi.advanceTimersByTimeAsync(4000));
+        if (outcome === "reject")
+          await act(async () => reject(new Error("denied")));
+        if (outcome === "close")
+          await nativePresentation("presentation", { active: false });
+        expect(requests().filter((r) => r.op === "stop")).toHaveLength(1);
+        await act(async () => grant({}));
+        expect(
+          sent().filter((m) => m.type === "pipPolicy" && m.authorized),
+        ).toHaveLength(0);
+      }
+      expect(fixture.finishBackgroundTransition).toHaveBeenCalled();
+    },
+  );
+
+  it("reveals media and toolbar only after the first presented frame", async () => {
+    expect(fixture.views["remoteDesktop.media"].pointerEvents).toBe("none");
+    expect(
+      fixture.views["remoteDesktop.toolbarPosition"]
+        .accessibilityElementsHidden,
+    ).toBe(true);
+    expect(host.textContent).toContain("My Mac");
+    expect(fixture.views["remoteDesktop.connectingStatus"].style).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ backgroundColor: "transparent" }),
+      ]),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(8000));
+    expect(host.textContent).toContain("remoteDesktop.connectionTakingLong");
+    await connect();
+    expect(fixture.views["remoteDesktop.media"].pointerEvents).toBe("auto");
+    expect(
+      fixture.views["remoteDesktop.toolbarPosition"]
+        .accessibilityElementsHidden,
+    ).toBe(false);
+    expect(host.textContent).not.toContain(
+      "remoteDesktop.connectionTakingLong",
+    );
+  });
+
   it("changes only the background preference while controlling and during sound renegotiation", async () => {
     fixture.nativeMedia = true;
     fixture.systemAudio = true;
@@ -672,17 +824,19 @@ describe("remote desktop controls", () => {
     await nativePresentation("presentation", { active: false });
     await act(async () => button("back").click());
     const laterBack = vi.fn();
-    act(() => root.render(
-      <RemoteDesktopSession
-        deviceId="computer"
-        deviceName="My Mac"
-        focused={true}
-        onBack={laterBack}
-        onRestore={viewer.onRestore}
-        onVisibility={viewer.onVisibility}
-        onEnded={viewer.onEnded}
-      />,
-    ));
+    act(() =>
+      root.render(
+        <RemoteDesktopSession
+          deviceId="computer"
+          deviceName="My Mac"
+          focused={true}
+          onBack={laterBack}
+          onRestore={viewer.onRestore}
+          onVisibility={viewer.onVisibility}
+          onEnded={viewer.onEnded}
+        />,
+      ),
+    );
     await nativePresentation("presentation", { active: true });
     expect(viewer.onBack).toHaveBeenCalledOnce();
     expect(laterBack).not.toHaveBeenCalled();
@@ -775,6 +929,49 @@ describe("remote desktop controls", () => {
       ).toHaveLength(0);
     },
   );
+  it.each(["grant", "timeout"])(
+    "keeps a cancelled foreground PiP start bounded until authorization: %s",
+    async (outcome) => {
+      fixture.nativeMedia = true;
+      act(() => root.render(<RemoteDesktopScreen />));
+      await connect();
+      await nativePresentation("pipCapability", { supported: true });
+      act(() => button("operations").click());
+      await act(async () => button("smallWindow").click());
+      let finish!: (value: unknown) => void;
+      const original = fixture.invoke.getMockImplementation()!;
+      fixture.invoke.mockImplementation((...args) =>
+        args[2][0].op === "presentation" && args[2][0].enabled
+          ? new Promise((resolve) => {
+              finish = resolve;
+            })
+          : original(...args),
+      );
+      await nativePresentation("presentationStarting");
+      await act(async () => {
+        AppState.currentState = "inactive";
+        fixture.appState!("inactive");
+      });
+      await nativePresentation("presentation", { active: true });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+        AppState.currentState = "active";
+        fixture.appState!("active");
+      });
+      await nativePresentation("presentation", { active: false });
+      await nativePresentation("presentation", { active: false });
+      expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+      if (outcome === "grant") await act(async () => finish({}));
+      await act(async () => vi.advanceTimersByTimeAsync(1100));
+      expect(requests().filter((r) => r.op === "stop")).toHaveLength(
+        outcome === "grant" ? 0 : 1,
+      );
+      expect(fixture.pipEnabled).toBe(true);
+      if (outcome === "grant") {
+        expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
+      } else await act(async () => finish({}));
+    },
+  );
   it("ends a detached connection when PiP closes without clearing the option", async () => {
     const viewer = await retainedViewer();
     viewer.render(false);
@@ -800,6 +997,106 @@ describe("remote desktop controls", () => {
       expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
     },
   );
+  it.each(["grant", "timeout"])(
+    "orders rapid Home entry after pending fullscreen restoration: %s",
+    async (outcome) => {
+      await retainedViewer();
+      let finish!: (value: unknown) => void;
+      const original = fixture.invoke.getMockImplementation()!;
+      fixture.invoke.mockImplementation((...args) =>
+        args[2][0].op === "control" && args[2][0].enabled
+          ? new Promise((resolve) => {
+              finish = resolve;
+            })
+          : original(...args),
+      );
+      await nativePresentation("presentation", { active: false });
+      const grants = () =>
+        requests().filter((r) => r.op === "presentation" && r.enabled).length;
+      const before = grants();
+      await act(async () => {
+        AppState.currentState = "inactive";
+        fixture.appState!("inactive");
+        AppState.currentState = "background";
+        fixture.appState!("background");
+      });
+      await nativePresentation("presentation", { active: true });
+      expect(grants()).toBe(before);
+      expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+      if (outcome === "timeout")
+        await act(async () => vi.advanceTimersByTimeAsync(4100));
+      await act(async () => finish({ controlling: true }));
+      expect(grants()).toBe(before + (outcome === "grant" ? 1 : 0));
+      await act(async () => vi.advanceTimersByTimeAsync(4100));
+      expect(requests().filter((r) => r.op === "stop")).toHaveLength(
+        outcome === "grant" ? 0 : 1,
+      );
+    },
+  );
+  it("preserves authorized native media while fullscreen signaling reconnects", async () => {
+    const viewer = await retainedViewer();
+    const controls = requests().filter((r) => r.op === "control").length;
+    const authorizations = requests().filter(
+      (r) => r.op === "presentation" && r.enabled,
+    ).length;
+    fixture.status = "offline";
+    viewer.render(true);
+    await nativePresentation("presentation", { active: false });
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+    expect(requests().filter((r) => r.op === "control")).toHaveLength(controls);
+    // Another immediate Home entry uses the still-acknowledged host permission.
+    const beforeReentry = sent().length;
+    await act(async () => {
+      AppState.currentState = "inactive";
+      fixture.appState!("inactive");
+      AppState.currentState = "background";
+      fixture.appState!("background");
+    });
+    await nativePresentation("presentation", { active: true });
+    expect(sent().slice(beforeReentry)).toContainEqual(
+      expect.objectContaining({ type: "pipPolicy", authorized: true }),
+    );
+    expect(
+      requests().filter((r) => r.op === "presentation" && r.enabled),
+    ).toHaveLength(authorizations);
+    await act(async () => {
+      AppState.currentState = "active";
+      fixture.appState!("active");
+    });
+    await nativePresentation("presentation", { active: false });
+    fixture.status = "online";
+    await act(async () => viewer.render(true));
+    expect(requests().filter((r) => r.op === "control")).toHaveLength(
+      controls + 1,
+    );
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+    act(() => button("operations").click());
+    expect(button("viewOnly").getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("revokes cached presentation permission when disabled during signaling recovery", async () => {
+    const viewer = await retainedViewer();
+    fixture.status = "offline";
+    viewer.render(true);
+    await nativePresentation("presentation", { active: false });
+    act(() => button("operations").click());
+    await act(async () => button("smallWindow").click());
+    const beforeBackground = sent().length;
+    await act(async () => {
+      AppState.currentState = "inactive";
+      fixture.appState!("inactive");
+      AppState.currentState = "background";
+      fixture.appState!("background");
+    });
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(1);
+    expect(
+      sent()
+        .slice(beforeBackground)
+        .some((m) => m.type === "pipPolicy" && m.authorized),
+    ).toBe(false);
+  });
+
   it("does not restore control from a preparation reply after disconnect", async () => {
     await retainedViewer();
     await nativePresentation("presentation", { active: false });
@@ -3192,7 +3489,7 @@ describe("remote desktop controls", () => {
     fixture.status = "offline";
     act(() => root.render(<RemoteDesktopScreen />));
     expect(host.textContent).toContain("remoteDesktop.reconnecting");
-    expect(host.textContent).not.toContain("My Mac");
+    expect(host.textContent).toContain("My Mac");
     act(() => button("back").click());
     expect(goBackGuarded).toHaveBeenCalledTimes(1);
     fixture.status = "online";
