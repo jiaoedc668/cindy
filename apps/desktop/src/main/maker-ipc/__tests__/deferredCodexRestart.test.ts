@@ -456,6 +456,34 @@ describe('runMemoryChangeWithCodexRestart', () => {
     };
   }
 
+  it.each(['memory-change', 'subagent-spawn-config-change'])(
+    'defers %s for a real auxiliary-host lease and applies after it settles', async (reason) => {
+      const { CodexAgent } = await import('../../../../../../packages/maker-core/src/agents/codex/index.js');
+      const agent = new CodexAgent({ auth: {}, runtimeConfig: {}, binaryPath: process.execPath, logger } as any);
+      const release = (agent as any).acquireHostSessionBindingLease('local-control:oauth-bearer');
+      let guard: Awaited<ReturnType<InstanceType<typeof CodexAgent>['beginLocalHostCredentialChange']>> | undefined;
+      const deps = createDeps();
+      deps.prepare.mockImplementation(async () => {
+        guard = await agent.beginLocalHostCredentialChange('settings refresh', {
+          allLocalHosts: true,
+          busyError: () => new CodexCredentialModeSwitchBusyError([]),
+        });
+        try { guard.assertIdle(); } catch (error) { guard.release(); throw error; }
+      });
+      deps.finalize.mockImplementation(async () => { await guard?.finalize(); });
+      const persist = vi.fn(async () => ({ value: true }));
+      const applyRuntime = reason === 'memory-change' ? vi.fn(async () => {}) : undefined;
+      const parts = { persist, applyRuntime, reason };
+      await expect(runMemoryChangeWithCodexRestart(deps, parts)).resolves.toEqual({ value: true, codexRestartDeferred: true });
+      expect(persist).toHaveBeenCalledOnce();
+      if (applyRuntime) expect(applyRuntime).not.toHaveBeenCalled();
+      expect(deps.scheduleDeferredRestart).toHaveBeenCalledWith(reason, applyRuntime);
+      release();
+      await expect(runMemoryChangeWithCodexRestart(deps, parts)).resolves.toEqual({ value: true, codexRestartDeferred: false });
+      if (applyRuntime) expect(applyRuntime).toHaveBeenCalledOnce();
+    },
+  );
+
   it('prepare 成功: persist → applyRuntime → finalize, 不登记延迟重启, 清掉旧登记', async () => {
     const deps = createDeps();
     const order: string[] = [];

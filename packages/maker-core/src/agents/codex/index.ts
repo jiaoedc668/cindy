@@ -2003,10 +2003,10 @@ export class CodexAgent extends BaseAgent {
     forceReload: boolean,
     remoteHostId?: string,
   ): Promise<{ skills: SkillMetadata[]; errors: Array<{ path?: string; message: string }> }> {
-    const host = remoteHostId
-      ? await this.getHost(remoteHostId)
-      : (await this.getUtilityHost()).host;
-    return await this.listSkillsForHost(host, workingDir, forceReload);
+    return this.withHostOperation(async () => remoteHostId
+      ? { key: hostKey(remoteHostId), host: await this.getHost(remoteHostId) }
+      : this.getUtilityHost(),
+    host => this.listSkillsForHost(host, workingDir, forceReload));
   }
 
   private async listSkillsForHost(
@@ -2186,7 +2186,7 @@ export class CodexAgent extends BaseAgent {
 
   async beginLocalHostCredentialChange(
     reason = 'CodexAgent local credential state changed',
-    options: { allLocalHosts?: boolean } = {},
+    options: { allLocalHosts?: boolean; busyError?: () => Error } = {},
   ): Promise<{
     assertIdle(): void;
     retireActiveHost(): Promise<void>;
@@ -2249,7 +2249,7 @@ export class CodexAgent extends BaseAgent {
       assertIdle: () => {
         const count = activeUseCount();
         if (count > 0) {
-          throw new Error(
+          throw options.busyError?.() ?? new Error(
             `Cannot restart local Codex host while ${count} active Codex session(s) are attached`,
           );
         }
@@ -2264,7 +2264,7 @@ export class CodexAgent extends BaseAgent {
         try {
           if (!hostRetired) {
             if (options.allLocalHosts) {
-              if (activeUseCount() > 0) throw new Error('Cannot refresh MCP while local Codex hosts are active or starting');
+              if (activeUseCount() > 0) throw options.busyError?.() ?? new Error('Cannot refresh MCP while local Codex hosts are active or starting');
               await retire();
             } else {
               await this.disposeLocalHostForCredentialChangeUnlocked(key, reason);
@@ -2582,6 +2582,41 @@ export class CodexAgent extends BaseAgent {
     }
   }
 
+  /** Reserve the returned host before handing it to a non-thread operation. */
+  private async acquireHostOperation(
+    getHost: () => Promise<{ key: string; host: AppServerHost }>,
+  ): Promise<{ key: string; host: AppServerHost; release: () => void }> {
+    while (true) {
+      const { key, host } = await getHost();
+      if (key.startsWith('remote:')) return { key, host, release: () => {} };
+      // No await between validation and reservation, including after getHost resolves.
+      if (this.hostCredentialModeSwitches.has(LOCAL_MCP_REFRESH_KEY)
+        || this.hostCredentialModeSwitches.has(key)
+        || this.retiringHosts.has(key)
+        || this.hosts.get(key) !== host) {
+        await this.waitForHostCredentialModeSwitch(key);
+        continue;
+      }
+      const generation = this.hostGenerations.get(key);
+      const release = this.acquireHostSessionBindingLease(key);
+      return { key, host, release: () => {
+        if (this.hostGenerations.get(key) === generation) release();
+      } };
+    }
+  }
+
+  private async withHostOperation<T>(
+    getHost: () => Promise<{ key: string; host: AppServerHost }>,
+    operation: (host: AppServerHost, key: string) => Promise<T>,
+  ): Promise<T> {
+    const { key, host, release } = await this.acquireHostOperation(getHost);
+    try {
+      return await operation(host, key);
+    } finally {
+      release();
+    }
+  }
+
   private async getUtilityHost(): Promise<{ key: string; host: AppServerHost }> {
     const key = hostKey();
     while (true) {
@@ -2603,18 +2638,19 @@ export class CodexAgent extends BaseAgent {
   }
 
   /** Start the local OAuth host used by non-model account control-plane RPCs. */
-  private async getStartedAccountHost(providerId?: string, startupTimeoutMs?: number): Promise<AppServerHost> {
+  private async withStartedAccountHost<T>(providerId: string | undefined, operation: (host: AppServerHost) => Promise<T>, startupTimeoutMs?: number): Promise<T> {
     const credentialMode = 'oauth-bearer';
-    const host = await this.getHost(undefined, credentialMode, {
-      providerId,
-      keyOverride: providerId ? `local-account:${providerId}:control-plane` : localControlPlaneHostKey(credentialMode),
-      hostPurpose: 'control-plane',
+    const key = providerId ? `local-account:${providerId}:control-plane` : localControlPlaneHostKey(credentialMode);
+    return this.withHostOperation(async () => ({
+      key,
+      host: await this.getHost(undefined, credentialMode, { providerId, keyOverride: key, hostPurpose: 'control-plane' }),
+    }), async (host) => {
+      const init = startupTimeoutMs
+        ? await host.ensureStartedWithTimeout(startupTimeoutMs, 'account token refresh')
+        : await host.ensureStarted();
+      if (init.codexHome && !providerId) this.codexHome = init.codexHome;
+      return operation(host);
     });
-    const init = startupTimeoutMs
-      ? await host.ensureStartedWithTimeout(startupTimeoutMs, 'account token refresh')
-      : await host.ensureStarted();
-    if (init.codexHome && !providerId) this.codexHome = init.codexHome;
-    return host;
   }
 
   /**
@@ -2662,56 +2698,60 @@ export class CodexAgent extends BaseAgent {
     const key = options?.providerId ? `local-account:${options.providerId}:models` : credentialMode
       ? localControlPlaneHostKey(credentialMode)
       : hostKey();
-    const host = credentialMode
-      ? await this.getHost(undefined, credentialMode, {
-        providerId: options?.providerId,
-        keyOverride: key,
-        hostPurpose: 'control-plane',
-      })
-      : (await this.getUtilityHost()).host;
-    const init = await host.ensureStarted();
-    if (init.codexHome && !options?.providerId) this.codexHome = init.codexHome;
+    return this.withHostOperation(async () => ({
+      key: credentialMode ? key : hostKey(),
+      host: credentialMode
+        ? await this.getHost(undefined, credentialMode, {
+          providerId: options?.providerId,
+          keyOverride: key,
+          hostPurpose: 'control-plane',
+        })
+        : (await this.getUtilityHost()).host,
+    }), async (host) => {
+      const init = await host.ensureStarted();
+      if (init.codexHome && !options?.providerId) this.codexHome = init.codexHome;
 
-    const models: CodexModelListResponse['data'] = [];
-    const seenCursors = new Set<string>();
-    let cursor: string | null = null;
-    try {
-      do {
-        const page: CodexModelListResponse = await host.request<CodexModelListResponse>(
-          Method.ModelList,
-          {
-            cursor,
-            limit: 100,
-            includeHidden: false,
-          },
-          { timeoutMs: CODEX_MODEL_LIST_RPC_TIMEOUT_MS },
-        );
-        models.push(...(Array.isArray(page.data) ? page.data : []));
-        const next: string | null = typeof page.nextCursor === 'string' && page.nextCursor.length > 0
-          ? page.nextCursor
-          : null;
-        if (next && seenCursors.has(next)) {
-          throw new Error(`Codex app-server model/list repeated cursor: ${next}`);
+      const models: CodexModelListResponse['data'] = [];
+      const seenCursors = new Set<string>();
+      let cursor: string | null = null;
+      try {
+        do {
+          const page: CodexModelListResponse = await host.request<CodexModelListResponse>(
+            Method.ModelList,
+            {
+              cursor,
+              limit: 100,
+              includeHidden: false,
+            },
+            { timeoutMs: CODEX_MODEL_LIST_RPC_TIMEOUT_MS },
+          );
+          models.push(...(Array.isArray(page.data) ? page.data : []));
+          const next: string | null = typeof page.nextCursor === 'string' && page.nextCursor.length > 0
+            ? page.nextCursor
+            : null;
+          if (next && seenCursors.has(next)) {
+            throw new Error(`Codex app-server model/list repeated cursor: ${next}`);
+          }
+          if (next) seenCursors.add(next);
+          cursor = next;
+        } while (cursor !== null);
+      } catch (error) {
+        if (credentialMode && error instanceof AppServerRequestTimeoutError) {
+          await this.retireHostKey(key, 'Codex control-plane model/list timed out', {
+            failIfActive: false,
+            logPrefix: 'codex model list refresh',
+          });
         }
-        if (next) seenCursors.add(next);
-        cursor = next;
-      } while (cursor !== null);
-    } catch (error) {
-      if (credentialMode && error instanceof AppServerRequestTimeoutError) {
-        await this.retireHostKey(key, 'Codex control-plane model/list timed out', {
-          failIfActive: false,
-          logPrefix: 'codex model list refresh',
-        });
+        throw error;
       }
-      throw error;
-    }
 
-    // Auth 切换 / logout 可能在分页请求期间 retire 旧 host。旧账号的迟到响应绝不能
-    // 覆盖新账号目录；只有仍登记为当前 local host 的结果才允许交给宿主。
-    if (this.hosts.get(key) !== host || !this.deps.onCodexLocalModelsListed) return false;
-    if (options?.providerId) await this.deps.onCodexLocalModelsListed(models, options.providerId);
-    else await this.deps.onCodexLocalModelsListed(models);
-    return true;
+      // Auth 切换 / logout 可能在分页请求期间 retire 旧 host。旧账号的迟到响应绝不能
+      // 覆盖新账号目录；只有仍登记为当前 local host 的结果才允许交给宿主。
+      if (this.hosts.get(key) !== host || !this.deps.onCodexLocalModelsListed) return false;
+      if (options?.providerId) await this.deps.onCodexLocalModelsListed(models, options.providerId);
+      else await this.deps.onCodexLocalModelsListed(models);
+      return true;
+    });
   }
 
   /** Read ChatGPT subscription windows and banked reset credits via app-server RPC. */
@@ -2719,8 +2759,8 @@ export class CodexAgent extends BaseAgent {
     // This RPC is credential-specific, unlike model/list or memory utilities. Requiring
     // oauth-bearer prevents a gateway/provider host from reading or mutating the wrong
     // account context; getHost refuses to replace a differently-authenticated active host.
-    const host = await this.getStartedAccountHost(providerId);
-    return await host.request<AccountRateLimitsResponse>(Method.AccountRateLimitsRead, undefined);
+    return this.withStartedAccountHost(providerId,
+      host => host.request<AccountRateLimitsResponse>(Method.AccountRateLimitsRead, undefined));
   }
 
   /** Consume one reset credit on the non-model app-server control plane. */
@@ -2728,11 +2768,8 @@ export class CodexAgent extends BaseAgent {
     params: ConsumeAccountRateLimitResetCreditParams,
     providerId?: string,
   ): Promise<ConsumeAccountRateLimitResetCreditResponse> {
-    const host = await this.getStartedAccountHost(providerId);
-    return await host.request<ConsumeAccountRateLimitResetCreditResponse>(
-      Method.AccountRateLimitResetCreditConsume,
-      params,
-    );
+    return this.withStartedAccountHost(providerId,
+      host => host.request<ConsumeAccountRateLimitResetCreditResponse>(Method.AccountRateLimitResetCreditConsume, params));
   }
 
   private async createHost(
@@ -2989,9 +3026,10 @@ export class CodexAgent extends BaseAgent {
             let tokens = await readAccountTokens();
             assertCurrentGeneration('external authentication scope');
             if (refresh && tokens.accessToken === staleAccessToken) {
-              const accountHost = await this.getStartedAccountHost(providerId, 8_000);
-              assertCurrentGeneration('account token refresh');
-              await accountHost.request('account/read', { refreshToken: true }, { timeoutMs: 8_000 });
+              await this.withStartedAccountHost(providerId, async (accountHost) => {
+                assertCurrentGeneration('account token refresh');
+                await accountHost.request('account/read', { refreshToken: true }, { timeoutMs: 8_000 });
+              }, 8_000);
               tokens = await readAccountTokens();
             }
             assertCurrentGeneration('external authentication result');
@@ -3152,9 +3190,12 @@ export class CodexAgent extends BaseAgent {
     if (opts?.maxTokens !== undefined) {
       log.warn(`maxTokens=${opts.maxTokens} ignored — Codex host protocol does not expose max_tokens`);
     }
+    let releaseHost: (() => void) | undefined;
     let subscription: ThreadSubscription | null = null;
     try {
-      const { host } = await this.getUtilityHost();
+      const leased = await this.acquireHostOperation(() => this.getUtilityHost());
+      releaseHost = leased.release;
+      const { host } = leased;
       await host.ensureStarted();
 
       // Host startup can await credential discovery and process readiness. The
@@ -3284,6 +3325,7 @@ export class CodexAgent extends BaseAgent {
       throw new OneShotError('network', err instanceof Error ? err.message : String(err));
     } finally {
       try { await subscription?.release(); } catch { /* no-op */ }
+      releaseHost?.();
     }
   }
 
@@ -14146,6 +14188,7 @@ export class CodexAgent extends BaseAgent {
     // session 全部同时报错。fork 是离线控制面操作(不跑 turn、无订阅者),改用
     // 唯一 key 的一次性 app-server:超限只让 fork 自己失败,不波及活跃任务。
     const forkHostKey = forkAccountId ? `local-account:${forkAccountId}:${localForkHostKey()}` : localForkHostKey();
+    let releaseForkLease: (() => void) | undefined;
     let forkHost: AppServerHost | undefined;
     let forkHostRetired = false;
     let stage: CodexForkStage = 'source-prepare';
@@ -14208,20 +14251,25 @@ export class CodexAgent extends BaseAgent {
       const forkStorage = await this.deps.resolveCodexThreadStorage?.(opts.sourceSdkSessionId);
       const forkSqliteHome = forkStorage?.sqliteHome;
       stage = 'host-create';
-      const host = await this.getHost(undefined, forkCredentialMode, {
-        keyOverride: forkHostKey,
-        ...(forkAccountId ? { providerId: forkAccountId } : {}),
-        ...(forkSqliteHome ? { sqliteHome: forkSqliteHome } : {}),
-        ...(forkStorage ? { historyHome: forkStorage.historyHome } : {}),
-        hostPurpose: 'control-plane',
-      }).catch((error) => {
-        // This is the outgoing source's offline fork host, not a target send.
-        // Missing old credentials must not trap a task on the provider it is leaving.
-        if (opts.stripEncryptedReasoning && error instanceof AgentNotAuthenticatedError) {
-          throw new CodexHistoryRecoveryRequiredError();
-        }
-        throw error;
+      const leased = await this.acquireHostOperation(async () => {
+        const host = await this.getHost(undefined, forkCredentialMode, {
+          keyOverride: forkHostKey,
+          ...(forkAccountId ? { providerId: forkAccountId } : {}),
+          ...(forkSqliteHome ? { sqliteHome: forkSqliteHome } : {}),
+          ...(forkStorage ? { historyHome: forkStorage.historyHome } : {}),
+          hostPurpose: 'control-plane',
+        }).catch((error) => {
+          // This is the outgoing source's offline fork host, not a target send.
+          // Missing old credentials must not trap a task on the provider it is leaving.
+          if (opts.stripEncryptedReasoning && error instanceof AgentNotAuthenticatedError) {
+            throw new CodexHistoryRecoveryRequiredError();
+          }
+          throw error;
+        });
+        return { key: forkHostKey, host };
       });
+      const { host } = leased;
+      releaseForkLease = leased.release;
       forkHost = host;
       stage = 'host-start';
       const initResp = await host.ensureStarted();
@@ -14344,17 +14392,21 @@ export class CodexAgent extends BaseAgent {
       } finally {
         // 一次性 host 用完即收,无论成败。key 唯一、无 session 绑定,
         // retire 不会波及任何共享 host 或活跃会话。
-        if (forkHost && !forkHostRetired) {
-          // Unsubscribe is not a writer-release barrier. Never publish a
-          // successful fork unless physical shutdown has been confirmed.
-          await retireForkHost(true).catch((err) => {
-            if (!operationFailed) throw new CodexForkError('host-retire', err);
-            if (forkFailure) forkFailure.cleanupFailed = true;
-            log.warn('fork host retire failed', {
-              forkHostKey,
-              err: err instanceof Error ? err.message : String(err),
+        try {
+          if (forkHost && !forkHostRetired) {
+            // Unsubscribe is not a writer-release barrier. Never publish a
+            // successful fork unless physical shutdown has been confirmed.
+            await retireForkHost(true).catch((err) => {
+              if (!operationFailed) throw new CodexForkError('host-retire', err);
+              if (forkFailure) forkFailure.cleanupFailed = true;
+              log.warn('fork host retire failed', {
+                forkHostKey,
+                err: err instanceof Error ? err.message : String(err),
+              });
             });
-          });
+          }
+        } finally {
+          releaseForkLease?.();
         }
       }
     }
@@ -14621,25 +14673,26 @@ export class CodexAgent extends BaseAgent {
     // config/read 返回的 effective config 已经把 in-memory enablement 合并进去了
     // (config_processor.rs:99-110), 所以 setMemory 后立刻 read 也能看到新值
     try {
-      const { key, host } = await this.getUtilityHost();
-      // app-server 重启后 in-memory enablement 会丢, server 端回到 config.toml 默认值 (memories=false);
-      // 读之前先把 maker 端持久化的 memoryOverride 同步过去, 否则 Settings 界面显示的是 server 默认值,
-      // 不是用户上次保存的设置。ensureMemoryOverridePushed 内部用 memoryOverridePushed 去重, 已 push 是 no-op。
-      await host.ensureStarted();
-      await this.ensureMemoryOverridePushed(host, key).catch((e) => {
-        this.deps.logger.warn('codex.getMemoryStatus: ensureMemoryOverridePushed failed', {
-          error: e instanceof Error ? e.message : String(e),
+      return await this.withHostOperation(() => this.getUtilityHost(), async (host, key) => {
+        // app-server 重启后 in-memory enablement 会丢, server 端回到 config.toml 默认值 (memories=false);
+        // 读之前先把 maker 端持久化的 memoryOverride 同步过去, 否则 Settings 界面显示的是 server 默认值,
+        // 不是用户上次保存的设置。ensureMemoryOverridePushed 内部用 memoryOverridePushed 去重, 已 push 是 no-op。
+        await host.ensureStarted();
+        await this.ensureMemoryOverridePushed(host, key).catch((e) => {
+          this.deps.logger.warn('codex.getMemoryStatus: ensureMemoryOverridePushed failed', {
+            error: e instanceof Error ? e.message : String(e),
+          });
         });
+        type ConfigReadResp = { config?: { features?: { memories?: boolean } } };
+        const resp = await host.request<ConfigReadResp>(Method.ConfigRead, { includeLayers: false });
+        const enabled = resp.config?.features?.memories ?? false;
+        return {
+          enabled,
+          // memoryOverride 没设过时 enabled 来自 config.toml + server 默认, 算 'user-config';
+          // host 显式覆盖过算 'host-runtime'
+          source: this.memoryOverride === undefined ? 'user-config' : 'host-runtime',
+        };
       });
-      type ConfigReadResp = { config?: { features?: { memories?: boolean } } };
-      const resp = await host.request<ConfigReadResp>(Method.ConfigRead, { includeLayers: false });
-      const enabled = resp.config?.features?.memories ?? false;
-      return {
-        enabled,
-        // memoryOverride 没设过时 enabled 来自 config.toml + server 默认, 算 'user-config';
-        // host 显式覆盖过算 'host-runtime'
-        source: this.memoryOverride === undefined ? 'user-config' : 'host-runtime',
-      };
     } catch (err) {
       if (err instanceof AgentNotAuthenticatedError) {
         // 未授权 → host 起不来, 报推断值 (codex 默认 false)
@@ -14656,6 +14709,8 @@ export class CodexAgent extends BaseAgent {
     const log = this.deps.logger.child('codex/setMemory');
     log.info('setMemory ▶', { from: this.memoryOverride, to: enabled });
     this.memoryOverride = enabled;
+    // A refresh already owns admission; the replacement host will read this override.
+    if (this.hostCredentialModeSwitches.has(LOCAL_MCP_REFRESH_KEY)) return { effective: 'next-session' };
     // 立即 push, 让所有 live thread 通过 server 端 reload_user_config 拿到新值
     try {
       const localSessionHosts = Array.from(this.hosts.entries()).filter(
@@ -14672,11 +14727,17 @@ export class CodexAgent extends BaseAgent {
       await Promise.all(localSessionHosts.map(async ([key, host]) => {
         // Only thread-serving local hosts receive Maker Memory. Remote hosts own
         // their native setting; model-list control-plane hosts have no live threads.
-        await host.request(Method.ExperimentalFeatureEnablementSet, {
-          enablement: { memories: enabled },
-        });
-        this.memoryOverridePushedByHost.set(key, enabled);
-        return key;
+        const generation = this.hostGenerations.get(key);
+        const release = this.acquireHostSessionBindingLease(key);
+        try {
+          await host.request(Method.ExperimentalFeatureEnablementSet, {
+            enablement: { memories: enabled },
+          });
+          this.memoryOverridePushedByHost.set(key, enabled);
+          return key;
+        } finally {
+          if (this.hostGenerations.get(key) === generation) release();
+        }
       }));
       log.info('setMemory ◀ pushed to app-server, hot-reloaded all live threads');
       return { effective: 'immediate' };
@@ -14696,13 +14757,14 @@ export class CodexAgent extends BaseAgent {
   async resetMemory(): Promise<MemoryResetResult> {
     const log = this.deps.logger.child('codex/resetMemory');
     log.info('resetMemory ▶');
-    const { host } = await this.getUtilityHost();
-    // server 端清 <CODEX_HOME>/memories/ 目录 + state_*.sqlite 的 memory stage 数据;
-    // 不影响各 thread 的 memory_mode (用户随后改 thread/memoryMode/set 才动那个)
-    await host.request(Method.MemoryReset, {});
-    log.info('resetMemory ◀ ok');
-    // server 不返回数量统计, removedEntries / removedBytes 留 undefined
-    return {};
+    return this.withHostOperation(() => this.getUtilityHost(), async (host) => {
+      // server 端清 <CODEX_HOME>/memories/ 目录 + state_*.sqlite 的 memory stage 数据;
+      // 不影响各 thread 的 memory_mode (用户随后改 thread/memoryMode/set 才动那个)
+      await host.request(Method.MemoryReset, {});
+      log.info('resetMemory ◀ ok');
+      // server 不返回数量统计, removedEntries / removedBytes 留 undefined
+      return {};
+    });
   }
 
   /**

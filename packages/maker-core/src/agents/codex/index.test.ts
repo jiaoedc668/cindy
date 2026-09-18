@@ -418,11 +418,78 @@ describe('CodexAgent spawn configuration', () => {
     } }));
     const models = agent.refreshLocalModels({ credentialMode: 'oauth-bearer' });
     await started.promise;
-    const guard = await agent.beginLocalHostCredentialChange('MCP refresh', { allLocalHosts: true });
-    expect(() => guard.assertIdle()).toThrow(/active Codex session/);
+    const busy = new Error('deferrable startup');
+    const guard = await agent.beginLocalHostCredentialChange('MCP refresh', { allLocalHosts: true, busyError: () => busy });
+    expect(() => guard.assertIdle()).toThrow(busy);
     guard.release();
     finish.resolve();
     await models;
+    await agent.dispose();
+  });
+
+  it.each([Method.ModelList, Method.ThreadFork, Method.AccountRateLimitsRead, Method.SkillsList, Method.ConfigRead, Method.MemoryReset])(
+    'keeps %s leased until the control-plane operation settles', async (method) => {
+      const started = deferred<void>();
+      const finish = deferred<void>();
+      const agent = new CodexAgent(createDeps());
+      const host = installFakeHost(agent, async (requested) => {
+        if (requested !== method) return undefined;
+        started.resolve();
+        await finish.promise;
+        if (method === Method.ModelList) return { data: [], nextCursor: null };
+        if (method === Method.AccountRateLimitsRead || method === Method.MemoryReset) return {};
+        return undefined;
+      });
+      const operation = method === Method.ModelList ? agent.refreshLocalModels({ credentialMode: 'oauth-bearer' })
+        : method === Method.ThreadFork ? agent.forkSdkSession({ sourceSdkSessionId: 'source', upToMessageId: 'message', workingDir: '/repo' })
+        : method === Method.AccountRateLimitsRead ? agent.readAccountRateLimits()
+        : method === Method.SkillsList ? agent.listAgentSkills({ workingDir: '/repo' })
+        : method === Method.ConfigRead ? agent.getMemoryStatus()
+        : agent.resetMemory();
+      await started.promise;
+      const busy = new Error('defer auxiliary operation');
+      const guard = await agent.beginLocalHostCredentialChange('MCP refresh', {
+        allLocalHosts: true, busyError: () => busy,
+      });
+      expect(() => guard.assertIdle()).toThrow(busy);
+      await expect(guard.retireActiveHost()).rejects.toThrow(/active Codex session/);
+      expect(host.retire).not.toHaveBeenCalled();
+      guard.release();
+      finish.resolve();
+      await operation;
+      const after = await agent.beginLocalHostCredentialChange('after operation', { allLocalHosts: true });
+      after.assertIdle();
+      await after.finalize();
+    },
+  );
+
+  it('releases the control-plane lease when its RPC rejects', async () => {
+    const agent = new CodexAgent(createDeps());
+    installFakeHost(agent, (method) => {
+      if (method === Method.ModelList) throw new Error('model failure');
+    });
+    await expect(agent.refreshLocalModels({ credentialMode: 'oauth-bearer' })).rejects.toThrow('model failure');
+    const guard = await agent.beginLocalHostCredentialChange('after failure', { allLocalHosts: true });
+    guard.assertIdle();
+    await guard.finalize();
+  });
+
+  it('defers memory push while refresh owns admission and new RPCs use the replacement host', async () => {
+    const agent = new CodexAgent(createDeps());
+    await agent.refreshLocalModels();
+    const old = createdTransports[0];
+    const guard = await agent.beginLocalHostCredentialChange('MCP refresh', { allLocalHosts: true });
+    const before = old.lines.length;
+    expect(await agent.setMemory(true)).toEqual({ effective: 'next-session' });
+    const models = agent.refreshLocalModels();
+    await Promise.resolve();
+    expect(old.lines).toHaveLength(before);
+    guard.assertIdle();
+    await guard.retireActiveHost();
+    await guard.finalize();
+    await models;
+    expect(old.closed).toBe(true);
+    expect(createdTransports).toHaveLength(2);
     await agent.dispose();
   });
 
@@ -680,6 +747,7 @@ describe('CodexAgent oneShot dispatch guard', () => {
     });
     const subscribeThread = vi.fn(() => ({ release: vi.fn() }));
     const host = { ensureStarted, request, subscribeThread };
+    (agent as any).hosts.set('test-utility-host', host);
     Object.defineProperty(agent, 'getUtilityHost', {
       value: vi.fn(async () => ({ key: 'test-utility-host', host })),
       configurable: true,
@@ -712,6 +780,7 @@ describe('CodexAgent oneShot dispatch guard', () => {
       request,
       subscribeThread,
     };
+    (agent as any).hosts.set('test-utility-host', host);
     Object.defineProperty(agent, 'getUtilityHost', {
       value: vi.fn(async () => ({ key: 'test-utility-host', host })),
       configurable: true,
@@ -929,6 +998,9 @@ function installFakeHost(
   );
   const getOpenAiWebSocketsEnabled = vi.fn(() => opts.openAiWebSocketsEnabled !== false);
   const host = {
+    activeSubscriptions: 0,
+    retire: vi.fn(async () => {}),
+    notifySubscribersOfForcedRetire: vi.fn(),
     ensureStarted,
     // startSession 的 initialize 直调走限时变体 (codex R13 P1): fake 里
     // 直接委托 ensureStarted (超时语义由 host.test.ts 的真 transport 覆盖)。
@@ -960,7 +1032,11 @@ function installFakeHost(
     discardPendingDescendantLineage: vi.fn(),
   };
 
-  const getHost = vi.fn(async () => host);
+  const getHost = vi.fn(async (remoteHostId?: string, _mode?: string, options?: { keyOverride?: string }) => {
+    const key = options?.keyOverride ?? (remoteHostId ? `remote:${remoteHostId}` : 'local');
+    (agent as any).hosts.set(key, host);
+    return host;
+  });
   Object.defineProperty(agent, 'getHost', {
     value: getHost,
   });

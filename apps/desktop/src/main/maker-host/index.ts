@@ -338,7 +338,7 @@ import {
   getSessionProvider,
   hydrateSessionProvider,
 } from './session-provider-store.js';
-import { prepareLocalCodexCredentialModeSwitch } from './codex-credential-switch.js';
+import { CodexCredentialModeSwitchBusyError, prepareLocalCodexCredentialModeSwitch } from './codex-credential-switch.js';
 import { createDesktopOrcaTeamStoreAdapter } from './orcaTeamStoreAdapter.js';
 import { broadcastOrcaWorkerChanged } from './orcaWorkerBroadcast.js';
 import {
@@ -2913,7 +2913,10 @@ export async function prepareCodexForAuthModeChange(options: { allLocalHosts?: b
     throw new Error('Codex credential mode change is already in progress');
   }
   const guard = _codexAgent
-    ? await _codexAgent.beginLocalHostCredentialChange('Codex desktop auth mode changed', options)
+    ? await _codexAgent.beginLocalHostCredentialChange('Codex desktop auth mode changed', {
+      ...options,
+      busyError: () => new CodexCredentialModeSwitchBusyError([]),
+    })
     : null;
   let prepared = false;
   // 软重启存活的本地 codex 会话。busy session 直接 fail closed，调用方据此避免先改持久化状态。
