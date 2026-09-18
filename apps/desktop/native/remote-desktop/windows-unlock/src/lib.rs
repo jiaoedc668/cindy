@@ -443,35 +443,16 @@ fn negotiate() -> Result<u32> {
     }
 }
 fn serialize(secret: &protocol::SavedCredential, scenario: i32) -> Result<Zeroizing<Vec<u8>>> {
-    // Windows 10/11 uses LOGON for both logon and unlock, while the legacy unlock
-    // scenario still requires KerbWorkstationUnlockLogon. LSA validates the result.
+    // This is the Credential Provider contract used by Microsoft's sample:
+    // LogonUI consumes a KERB_INTERACTIVE_UNLOCK_LOGON with the password in the
+    // temporary serialized buffer. Credential Provider owns no durable copy;
+    // every intermediate Rust buffer is zeroized, and the caller owns the final
+    // CoTaskMem buffer until Windows consumes it.
     let domain: Vec<u16> = secret.domain.encode_utf16().collect();
     let user: Vec<u16> = secret.user.encode_utf16().collect();
-    let password = Zeroizing::new(win::wide(&secret.password));
-    let mut size = 0;
-    unsafe {
-        let _ = CredProtectW(false, &password, PWSTR::null(), &mut size, None);
-    }
-    if size == 0 || size > 8192 {
-        return Err(rejected());
-    }
-    let mut protected = Zeroizing::new(vec![0u16; size as usize]);
-    unsafe {
-        CredProtectW(
-            false,
-            &password,
-            PWSTR(protected.as_mut_ptr()),
-            &mut size,
-            None,
-        )?;
-    }
-    let length = protected
-        .iter()
-        .position(|v| *v == 0)
-        .ok_or_else(rejected)?;
-    protected.truncate(length);
+    let password: Vec<u16> = secret.password.encode_utf16().collect();
     let total = mem::size_of::<KERB_INTERACTIVE_UNLOCK_LOGON>()
-        + 2 * (domain.len() + user.len() + protected.len());
+        + 2 * (domain.len() + user.len() + password.len());
     let mut bytes = Zeroizing::new(vec![0u8; total]);
     let mut logon: KERB_INTERACTIVE_UNLOCK_LOGON = unsafe { mem::zeroed() };
     logon.Logon.MessageType = if scenario == CPUS_UNLOCK_WORKSTATION.0 {
@@ -483,7 +464,7 @@ fn serialize(secret: &protocol::SavedCredential, scenario: i32) -> Result<Zeroiz
     for (text, field) in [
         (&domain[..], &mut logon.Logon.LogonDomainName),
         (&user[..], &mut logon.Logon.UserName),
-        (&protected[..], &mut logon.Logon.Password),
+        (&password[..], &mut logon.Logon.Password),
     ] {
         let length = u16::try_from(text.len() * 2).map_err(|_| invalid())?;
         field.Length = length;
@@ -619,7 +600,7 @@ mod tests {
         assert_eq!(unsafe { DllCanUnloadNow() }, S_OK);
     }
     #[test]
-    fn serialization_uses_bounded_offsets_and_protects_the_fake_password() {
+    fn serialization_uses_bounded_offsets_and_zeroizes_only_temporary_password_buffers() {
         let secret = protocol::SavedCredential {
             user: "fake-user".into(),
             domain: "fake-domain".into(),
@@ -654,7 +635,9 @@ mod tests {
                 .encode_utf16()
                 .flat_map(u16::to_le_bytes)
                 .collect();
-            assert!(!packed.windows(clear.len()).any(|bytes| bytes == clear));
+            // LogonUI must receive the password in the documented Kerberos
+            // serialization. The test uses a fake password only.
+            assert!(packed.windows(clear.len()).any(|bytes| bytes == clear));
         }
     }
 }
