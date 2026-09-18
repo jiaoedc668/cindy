@@ -3478,6 +3478,11 @@ export function clearDeferredCodexRestartForOwnerBoundary(): void {
   deferredCodexRestartHolder?.clear();
 }
 
+/** Reuse the owner-scoped idle retry for settings whose persistence already succeeded. */
+export function scheduleDeferredCodexRestart(reason: string): void {
+  deferredCodexRestartHolder?.schedule(reason);
+}
+
 export function clearWorkingDirectoryRecoveryForOwnerBoundary(): void {
   workingDirectoryRecovery.clear();
 }
@@ -5812,18 +5817,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 内置 server 名对自定义 MCP 是保留名：撞名会在装配层顶替内置 server 并继承
     // 它在 MCP 审批策略里的信任，所以 CRUD 阶段就拒收。
     getReservedMcpIds: () => getBuiltinMcpServerNames(),
-    // Codex 的 MCP flags 冻在 codexEnvironment 的 cached spawn 配置里,清缓存 + dispose app-server,
-    // 让下个 codex 会话按新 MCP 配置重 spawn(与 slack 变更同款 best-effort;busy 会话软重启失败只告警)。
-    // 顺序：先 dispose app-server（含 busy 检查），成功后再关 bridge/cache。
-    // 若先关 bridge、后 dispose 失败（busy），running 会话的 mcp_servers URL 会指向已停的 bridge。
+    // Persisted MCP changes must eventually replace the frozen spawn config;
+    // busy hosts keep their bridge until the existing idle retry can refresh it.
     invalidateCodex: async () => {
-      try {
-        await restartCodexAfterAuthModeChange(shutdownCodexEnvironment);
-      } catch (err) {
-        log.warn('restartCodexAfterAuthModeChange on custom mcp change failed', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+      const ownerScopeKey = activeOwnerScopeKey();
+      await refreshCodexMcpEnvironment({
+        restartCodex: restartCodexAfterAuthModeChange,
+        shutdownCodexEnvironment,
+        onDeferred: () => {
+          if (!isAppSessionBoundaryPending() && activeOwnerScopeKey() === ownerScopeKey) {
+            scheduleDeferredCodexRestart('Custom MCP configuration changed');
+          }
+        },
+        logger: log,
+      });
       // Pi 的 MCP bridge 同样按首个会话冻结 server 集合:自定义 MCP 增删改后必须 invalidate,
       // 否则新 Pi 会话仍暴露已删/已禁用的工具、拿不到新启用的工具(codex review P1)。
       // 与 codex 分支独立(不依赖 codexRestarted),下一次 startSession lazy 重建。

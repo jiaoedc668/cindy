@@ -14,7 +14,7 @@ import { MakerContactsManager } from '@cindy/maker-core';
 // handler 工厂本身不用它们, mock 空壳即可。
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/unused', on: () => undefined },
-  ipcMain: { handle: () => undefined },
+  ipcMain: { handle: vi.fn() },
   BrowserWindow: { getAllWindows: () => [] },
 }));
 
@@ -25,7 +25,24 @@ vi.mock('../../contacts-sync/driver.js', () => ({
   setContactsDeviceSyncEnabled: vi.fn(),
 }));
 
-import { createContactsIpcHandlers } from '../contacts-ipc.js';
+vi.mock('../../maker-host/index.js', () => ({
+  restartCodexAfterAuthModeChange: vi.fn(async () => { throw new Error('control RPC busy'); }),
+}));
+vi.mock('../../mcp-integrations/codexEnvironment.js', () => ({ shutdownCodexEnvironment: vi.fn() }));
+vi.mock('../register.js', () => ({ scheduleDeferredCodexRestart: vi.fn() }));
+vi.mock('../../security/trustedAppRenderer.js', () => ({ assertTrustedAppRendererEvent: vi.fn() }));
+vi.mock('../../maker-host/contacts-settings-store.js', () => ({
+  readContactsSettingsState: () => ({ value: { enabled: false }, isCustomized: false }),
+  writeContactsEnabled: vi.fn(),
+}));
+
+import { ipcMain } from 'electron';
+import * as appSessionState from '../../appSessionState.js';
+import { restartCodexAfterAuthModeChange } from '../../maker-host/index.js';
+import { shutdownCodexEnvironment } from '../../mcp-integrations/codexEnvironment.js';
+import { writeContactsEnabled } from '../../maker-host/contacts-settings-store.js';
+import { scheduleDeferredCodexRestart } from '../register.js';
+import { createContactsIpcHandlers, registerContactsIpc } from '../contacts-ipc.js';
 import { MAKER_INVOKE } from '../channels.js';
 
 function noopLogger() {
@@ -71,6 +88,8 @@ describe('contacts-ipc handlers', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
     manager.dispose();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -85,6 +104,37 @@ describe('contacts-ipc handlers', () => {
     await expect(handlers[MAKER_INVOKE.CONTACTS_SETTINGS_SET]!('yes')).rejects.toThrow(
       /INVALID_PARAMS/,
     );
+  });
+
+  it('production wiring retains the bridge and schedules idle retry after a persisted toggle meets busy RPC', async () => {
+    registerContactsIpc();
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([channel]) => channel === MAKER_INVOKE.CONTACTS_SETTINGS_SET,
+    )![1];
+    await expect(handler({} as Electron.IpcMainInvokeEvent, true)).resolves.toEqual({
+      enabled: true, codexMcpRefreshed: false,
+    });
+    expect(writeContactsEnabled).toHaveBeenCalledWith(true);
+    expect(shutdownCodexEnvironment).not.toHaveBeenCalled();
+    expect(scheduleDeferredCodexRestart).toHaveBeenCalledWith('Contacts MCP configuration changed');
+  });
+
+  it.each(['pending', 'changed'] as const)('does not re-register a late refresh after owner boundary is %s', async (boundary) => {
+    const scope = vi.spyOn(appSessionState, 'activeOwnerScopeKey').mockReturnValue('owner-a');
+    const pending = vi.spyOn(appSessionState, 'isAppSessionBoundaryPending').mockReturnValue(false);
+    vi.mocked(restartCodexAfterAuthModeChange).mockImplementationOnce(async () => {
+      if (boundary === 'pending') pending.mockReturnValue(true);
+      else scope.mockReturnValue('owner-b');
+      throw new Error('old owner refresh failed');
+    });
+    registerContactsIpc();
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([channel]) => channel === MAKER_INVOKE.CONTACTS_SETTINGS_SET,
+    )![1];
+    await expect(handler({} as Electron.IpcMainInvokeEvent, true)).resolves.toEqual({
+      enabled: true, codexMcpRefreshed: false,
+    });
+    expect(scheduleDeferredCodexRestart).not.toHaveBeenCalled();
   });
 
   it('开关落盘失败按 [CODE] 协议上抛, 不漏裸 Error(规则 13)', async () => {

@@ -18,6 +18,7 @@
 import { BrowserWindow, ipcMain } from 'electron';
 
 import { createLogger } from '../logger.js';
+import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import {
   broadcastContactsNow,
   getContactsDeviceSyncStatus,
@@ -360,13 +361,18 @@ export function registerContactsIpc(): void {
     // 契约: 任一步失败都 rethrow(见 ContactsIpcDeps.invalidateCodexMcp 注释),
     // handler 把失败折成 codexMcpRefreshed:false 由 renderer 提示延迟生效。
     invalidateCodexMcp: async () => {
+      const ownerScopeKey = activeOwnerScopeKey();
+      const { scheduleDeferredCodexRestart } = await import('./register.js');
       try {
         const { restartCodexAfterAuthModeChange } = await import('../maker-host/index.js');
         const { shutdownCodexEnvironment } = await import('../mcp-integrations/codexEnvironment.js');
         await restartCodexAfterAuthModeChange(shutdownCodexEnvironment);
       } catch (err) {
+        if (!isAppSessionBoundaryPending() && activeOwnerScopeKey() === ownerScopeKey) {
+          scheduleDeferredCodexRestart('Contacts MCP configuration changed');
+        }
         log.warn(
-          'restartCodexAfterAuthModeChange on contacts toggle failed — codex keeps stale MCP config until app restart or re-toggle',
+          'restartCodexAfterAuthModeChange on contacts toggle failed — idle retry if owner is still current',
           {
             error: err instanceof Error ? err.message : String(err),
           },
