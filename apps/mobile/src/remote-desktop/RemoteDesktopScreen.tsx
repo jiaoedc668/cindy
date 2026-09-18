@@ -2040,6 +2040,19 @@ export function RemoteDesktopSession({
     ) {
       pendingPresentation.current?.(false);
       pendingPresentation.current = null;
+      // A saved preference alone cannot keep an invisible lease alive. Back
+      // already handles refusal via its waiter; route blur has no such waiter.
+      // Do not interrupt another transition that already owns presentation.
+      if (
+        !focusedRef.current &&
+        !presentation.current &&
+        !actualPresentation.current
+      ) {
+        leaving.current = true;
+        setIsLeaving(true);
+        pause(true);
+        navigation.current.onEnded?.();
+      }
       return;
     }
     settingInFlight.current = true;

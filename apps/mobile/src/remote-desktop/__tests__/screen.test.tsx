@@ -560,6 +560,87 @@ describe("remote desktop controls", () => {
     });
     return { ...callbacks, render };
   };
+  it.each(["unsupported", "no-frame", "control-busy", "settings-busy"])(
+    "ends a detached native lease when PiP admission is refused: %s",
+    async (reason) => {
+      fixture.nativeMedia = true;
+      fixture.pipEnabled = true;
+      fixture.systemAudio = true;
+      fixture.lockOnExit = true;
+      const invoke = fixture.invoke.getMockImplementation()!;
+      fixture.invoke.mockImplementation(async (...args) => {
+        const result = await invoke(...args);
+        return args[2][0].op === "capabilities" && reason === "unsupported"
+          ? { ...result, backgroundViewing: false }
+          : result;
+      });
+      const onEnded = vi.fn();
+      const render = (focused: boolean) =>
+        root.render(
+          <RemoteDesktopSession
+            deviceId="computer"
+            deviceName="My Mac"
+            focused={focused}
+            onEnded={onEnded}
+            onBack={() => {}}
+          />,
+        );
+      await act(async () => render(true));
+      if (reason === "no-frame") {
+        await act(async () =>
+          fixture.message!({ nativeEvent: { data: '{"type":"ready"}' } }),
+        );
+      } else await connect();
+      let finish: (() => void) | undefined;
+      if (reason === "control-busy") {
+        const original = fixture.invoke.getMockImplementation()!;
+        fixture.invoke.mockImplementation((...args) => {
+          const op = args[2][0].op;
+          if (op === "control") {
+            return new Promise((resolve) => {
+              finish = () => resolve({ controlling: false });
+            });
+          }
+          return original(...args);
+        });
+      } else if (reason === "settings-busy") {
+        fixture.playback.mockImplementation((enabled) =>
+          enabled
+            ? new Promise((resolve) => {
+                finish = () => resolve();
+              })
+            : Promise.resolve(),
+        );
+      }
+      if (reason === "control-busy" || reason === "settings-busy") {
+        act(() => button("operations").click());
+        await act(async () =>
+          button(reason === "control-busy" ? "viewOnly" : "sound").click(),
+        );
+        expect(finish).toBeDefined();
+      }
+      await act(async () => render(false));
+      expect(onEnded).toHaveBeenCalledOnce();
+      expect(requests().filter((r) => r.op === "stop")).toHaveLength(1);
+      expect(requests().find((r) => r.op === "stop")).toMatchObject({
+        lockScreen: true,
+      });
+      expect(
+        requests().filter((r) => r.op === "presentation" && r.enabled),
+      ).toHaveLength(0);
+      fixture.invoke.mockClear();
+      await act(async () => {
+        finish?.();
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(
+        requests().filter((r) =>
+          ["heartbeat", "start", "presentation"].includes(r.op),
+        ),
+      ).toHaveLength(0);
+      expect(fixture.pipEnabled).toBe(true);
+    },
+  );
   it("arms automatic native PiP in foreground without releasing control", async () => {
     fixture.nativeMedia = true;
     act(() => root.render(<RemoteDesktopScreen />));
