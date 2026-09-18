@@ -44,6 +44,14 @@ builds the release host, input helper and Node addon. The development build must
 set `CINDY_DESKTOP_DEV_APP` and `CINDY_DESKTOP_DEV_EXECUTABLE` to its exact checkout
 and Electron paths. A passing Node test suite alone is not a successful native build.
 
+The public service pipe grants interactive clients data, synchronization and
+read-attributes access. Windows `CreateFileW` checks `FILE_READ_ATTRIBUTES` even
+when a client requests only data access; omitting it leaves the service running
+but rejects connections with Win32 error 5. Do not substitute generic write access,
+which would also grant creation of pipe server instances. Run the service-pipe
+regression from an interactive, non-SYSTEM Windows account: it exercises the
+production ACL, probe exchange and rejection of a second client-created server.
+
 ```text
 cargo test --locked --manifest-path apps/desktop/native/remote-desktop/windows-host/Cargo.toml --bin cindy-windows-desktop-host --target-dir <unique-temporary-directory> -- --test-threads=1
 ```
