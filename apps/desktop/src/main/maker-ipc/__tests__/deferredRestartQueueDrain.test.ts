@@ -305,7 +305,7 @@ describe('deferred Codex restart × input queue drain (#2506)', () => {
     expect(latestProjection(h.projections).pendingQueue).toEqual([]);
   });
 
-  it.each(['busy', 'bridge-failure', 'new-runtime'])(
+  it.each(['busy', 'bridge-failure', 'new-runtime', 'new-mcp-config'])(
     'wakes a preserved queue after a closed session disappears during %s retry', async (failure) => {
       const h = createRestartHarness();
       await h.coordinator.ensureQueueRestored(h.SID);
@@ -321,7 +321,7 @@ describe('deferred Codex restart × input queue drain (#2506)', () => {
         first = false;
         if (failure === 'busy') throw new CodexCredentialModeSwitchBusyError([]);
         if (failure === 'bridge-failure') throw new Error('bridge preparation failed');
-        h.service.schedule('new-runtime', async () => {});
+        h.service.schedule(failure, failure === 'new-runtime' ? async () => {} : undefined);
       });
       await h.service.flushBeforeLocalCodexSessionStart();
       expect(h.service.isPending()).toBe(true);

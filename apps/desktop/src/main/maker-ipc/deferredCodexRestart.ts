@@ -95,6 +95,11 @@ export class DeferredCodexRestartService {
     // review 第 2 轮)。同域覆盖(memory-over-memory 传入新回调)仍是 last-write-wins。
     if (applyRuntime !== undefined) {
       this.pendingApplyRuntime = applyRuntime;
+    } else if (this.applying && !this.pendingApplyRuntime) {
+      // Even a persist-only edit must leave work for the active attempt to
+      // consume: its bridge may already have snapshotted the previous config.
+      // Reuse the existing work slot without replacing a queued Memory update.
+      this.pendingApplyRuntime = async () => {};
     }
     if (!alreadyPending) {
       this.scheduleRetry();
@@ -203,9 +208,8 @@ export class DeferredCodexRestartService {
         return;
       }
       if (this.pendingApplyRuntime) {
-        // restart await 期间又有新登记:重启已带最新 persist 值,但新登记的
-        // runtime 尚未应用 —— 本轮不收口(pending 保持,兜底定时器仍在),
-        // 下一边界把新 runtime 应用后再重启一次收口。
+        // Work arrived after the guarded apply loop. The bridge may have frozen
+        // an older persisted config too; keep pending until the next restart.
         return;
       }
       const sessionIds = [...this.pendingSessionIds];

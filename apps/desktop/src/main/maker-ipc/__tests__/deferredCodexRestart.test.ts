@@ -361,7 +361,7 @@ describe('DeferredCodexRestartService', () => {
     expect(service.isPending()).toBe(true);
   });
 
-  it('旧 runtime await 期间新 schedule: 循环接着应用新闭包, 不被旧闭包收口误清', async () => {
+  it.each(['runtime', 'mcp'] as const)('consumes %s work arriving before the bridge snapshot in the same restart', async (kind) => {
     const order: string[] = [];
     let resolveFirst: () => void = () => {};
     const restart = vi.fn(async () => {
@@ -379,20 +379,24 @@ describe('DeferredCodexRestartService', () => {
     service.onSessionSettled();
     await Promise.resolve();
     // 旧 runtime 还挂着时用户再次变更(busy 路径)覆盖登记
-    service.schedule('memory-change', async () => {
+    service.schedule('settings-change', kind === 'mcp' ? undefined : async () => {
       order.push('second');
     });
     resolveFirst();
     await vi.runOnlyPendingTimersAsync();
-    expect(order).toEqual(['first:start', 'second', 'restart']);
+    expect(order).toEqual(kind === 'mcp' ? ['first:start', 'restart'] : ['first:start', 'second', 'restart']);
     expect(service.isPending()).toBe(false);
   });
 
-  it('restart await 期间新 schedule: 本轮不收口, 下一边界应用新 runtime 后再重启', async () => {
+  it.each(['runtime', 'mcp', 'mixed'] as const)('retains %s changes made after the active restart snapshots config', async (kind) => {
     const runtimes: string[] = [];
+    let persistedRevision = 1;
+    const snapshots: number[] = [];
+    const onApplied = vi.fn();
     let resolveRestart: () => void = () => {};
     let restartCalls = 0;
     const restart = vi.fn(() => {
+      snapshots.push(persistedRevision);
       restartCalls += 1;
       if (restartCalls === 1) {
         return new Promise<void>((resolve) => {
@@ -401,7 +405,7 @@ describe('DeferredCodexRestartService', () => {
       }
       return Promise.resolve();
     });
-    const { service } = createService({ restart });
+    const { service } = createService({ restart, onApplied });
     service.schedule('memory-change', async () => {
       runtimes.push('first');
     });
@@ -409,19 +413,29 @@ describe('DeferredCodexRestartService', () => {
     await Promise.resolve();
     await Promise.resolve();
     // 第一次 restart 还挂着时又来一次变更登记
-    service.schedule('memory-change', async () => {
-      runtimes.push('second');
-    });
+    if (kind !== 'mcp') {
+      service.schedule('memory-change', async () => {
+        runtimes.push('second');
+      });
+    }
+    persistedRevision = 2;
+    if (kind !== 'runtime') service.schedule('custom-mcp-change');
+    persistedRevision = 3;
+    if (kind !== 'runtime') service.schedule('contacts-change');
     resolveRestart();
     await Promise.resolve();
     await Promise.resolve();
     // 本轮不收口:pending 保持, second 尚未应用
     expect(service.isPending()).toBe(true);
     expect(runtimes).toEqual(['first']);
+    expect(snapshots).toEqual([1]);
+    expect(onApplied).not.toHaveBeenCalled();
 
     service.onSessionSettled();
     await vi.runOnlyPendingTimersAsync();
-    expect(runtimes).toEqual(['first', 'second']);
+    expect(runtimes).toEqual(kind === 'mcp' ? ['first'] : ['first', 'second']);
+    expect(snapshots).toEqual([1, 3]);
+    expect(onApplied).toHaveBeenCalledOnce();
     expect(restart).toHaveBeenCalledTimes(2);
     expect(service.isPending()).toBe(false);
   });
