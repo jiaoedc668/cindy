@@ -11,6 +11,8 @@ crate-type = ["cdylib"]
 napi-build = "=2.1.3"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+zeroize = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 base64 = "0.22"
@@ -22,7 +24,8 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Securit
 
 [features]
 development = ["windows-sys/Win32_System_Diagnostics_Debug"]
-default = ["windows-sys/Win32_System_JobObjects", "windows-sys/Win32_System_Registry", "windows-sys/Win32_System_SystemServices", "windows-sys/Win32_UI_Input_KeyboardAndMouse"]
+default = ["unlock", "windows-sys/Win32_System_JobObjects", "windows-sys/Win32_System_Registry", "windows-sys/Win32_System_SystemServices", "windows-sys/Win32_UI_Input_KeyboardAndMouse"]
+unlock = ["windows-sys/Win32_Security_Credentials", "windows-sys/Win32_System_LibraryLoader", "windows-sys/Win32_System_SystemInformation"]
 
 [profile.release]
 panic = "abort"

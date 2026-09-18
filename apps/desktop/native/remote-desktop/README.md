@@ -24,6 +24,15 @@ tests and does not prove lock/UAC or physical cross-device behavior.
 
 ## Windows service installation and authorization
 
+The optional `windows-unlock` crate produces a Windows credential-provider DLL.
+The explicit service setup installs/registers it alongside the host/input pair,
+and removal unregisters only this installation's derived CLSID. It does not
+replace any system provider. Desktop's package signing step signs the DLL as
+well as both EXEs; Dev uses its checkout-bound service grant. Test the provider
+with `cargo test --locked --manifest-path windows-unlock/Cargo.toml` from this
+directory, using a unique temporary target directory. Fake-password packing and
+an absent-request/no-tile test do not replace real Windows logon validation.
+
 The packaged settings action installs a separate protected host/input pair, keeps
 the application's custom location, and persists the approved installation and
 Windows user rather than a process ID. Application code is protected in place

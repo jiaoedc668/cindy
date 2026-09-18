@@ -254,7 +254,11 @@ pub fn install(pid: u32) -> Result<()> {
     // This removes/replaces the legacy SCM registration under the same name.
     // Stop must finish before any privileged binary is replaced.
     crate::service::uninstall()?;
-    for name in [installation::HOST, installation::INPUT] {
+    for name in [
+        installation::HOST,
+        installation::INPUT,
+        crate::unlock_protocol::PROVIDER_DLL,
+    ] {
         let destination = target.directory.join(name);
         if destination.exists() {
             security::check_paths(vec![destination.clone()])?;
@@ -287,6 +291,7 @@ pub fn install(pid: u32) -> Result<()> {
         installation::APPROVAL,
         &approval.encode(),
     )?;
+    crate::unlock::register(&target)?;
     crate::service::install()?;
     if let Some(restore) = restore.as_mut() {
         restore.commit();
@@ -296,6 +301,7 @@ pub fn install(pid: u32) -> Result<()> {
 
 pub fn remove() -> Result<()> {
     let installation = Installation::current()?;
+    crate::unlock::unregister(&installation)?;
     crate::service::uninstall()?;
     if !installation.directory.exists() {
         return Ok(());
@@ -319,6 +325,7 @@ pub fn remove() -> Result<()> {
         "acl-restore.json.new",
         installation::INPUT,
         installation::HOST,
+        crate::unlock_protocol::PROVIDER_DLL,
     ] {
         let path = installation.directory.join(name);
         if path.exists() {

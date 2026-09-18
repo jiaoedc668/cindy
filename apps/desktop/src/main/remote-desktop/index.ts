@@ -12,7 +12,8 @@ import {
   type WebContents,
   type DesktopCapturerSource,
 } from 'electron';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { SUPPORTED_LOCALES } from '../../shared/locale';
 import { loadDesktopIceServers } from './iceConfig';
 import { remoteCredentialHost } from './credentialHost';
 import {
@@ -45,7 +46,12 @@ import { desktopCaptureSource, enumerateDesktopSources } from './captureSource';
 import { encodeDesktopFrame, encodeNativeRelayFrame } from './frame';
 import { transferDesktopClipboard, transferDesktopClipboardContent } from './clipboard';
 import { NativeDesktopCapture } from './nativeCapture';
-import { readWindowsDesktopSupport, configureWindowsDesktopSupport } from './windowsHost';
+import {
+  readWindowsDesktopSupport,
+  configureWindowsDesktopSupport,
+  loadWindowsUnlockNative,
+} from './windowsHost';
+import { WindowsAutoUnlock } from './windowsAutoUnlock';
 import { WindowsDesktopSetup } from './windowsSetup';
 import {
   DesktopInputHost,
@@ -132,6 +138,25 @@ let pending: {
 // A dead input helper or a refused injection is an input failure, not a session
 // failure: release control and keep the lease, capture and media running.
 const input = new DesktopInputHost(() => remoteDesktop.releaseControl());
+const windowsUnlock = new WindowsAutoUnlock({
+  load: () => loadWindowsUnlockNative(),
+  scope: () => {
+    if (process.platform !== 'win32') return null;
+    const identity = remoteCredentialHost.currentToken?.();
+    return identity
+      ? createHash('sha256')
+          .update(
+            JSON.stringify([
+              identity.realm,
+              identity.membership,
+              identity.authDevice,
+              app.getPath('userData'),
+            ]),
+          )
+          .digest('hex')
+      : null;
+  },
+});
 function stopVideo(): void {
   offerGeneration++;
   videoAttempt = undefined;
@@ -348,7 +373,8 @@ export const remoteDesktop = new RemoteDesktopController({
     const viewerDisplay = enabled && (await viewerDisplaySupported());
     return {
       version: 1,
-      cursorOverlay: process.platform === 'darwin' || (process.platform === 'win32' && windowsAvailable),
+      cursorOverlay:
+        process.platform === 'darwin' || (process.platform === 'win32' && windowsAvailable),
       lockOnExit: process.platform === 'darwin',
       clipboardContent: process.platform === 'darwin' || process.platform === 'win32',
       clipboardText: process.platform === 'darwin' || process.platform === 'win32',
@@ -385,11 +411,7 @@ export const remoteDesktop = new RemoteDesktopController({
     // Compatibility viewers must also wake/capture without waiting for
     // Chromium's thumbnail enumeration, which may hang on a sleeping display.
     if (process.platform === 'darwin' || windowsAvailable) {
-      const frame = await nativeCapture.frame(
-        displayId,
-        cursorOverlay === true,
-        nativeSettings,
-      );
+      const frame = await nativeCapture.frame(displayId, cursorOverlay === true, nativeSettings);
       return encodeNativeRelayFrame(frame, (jpeg) => nativeImage.createFromBuffer(jpeg));
     }
     const available = await sources(true).catch((error) => {
@@ -420,7 +442,10 @@ export const remoteDesktop = new RemoteDesktopController({
     await waitForDisplayRestore(displayId, expected, beforeChange);
   },
   createViewerDisplay,
-  startInput: (displayId) => input.start(displayId),
+  startInput: async (displayId) => {
+    await windowsUnlock.unlock();
+    await input.start(displayId);
+  },
   input: (events) => {
     try {
       input.input(events);
@@ -433,7 +458,10 @@ export const remoteDesktop = new RemoteDesktopController({
       throw error;
     }
   },
-  stopInput: () => input.stop(),
+  stopInput: () => {
+    windowsUnlock.cancel();
+    input.stop();
+  },
   releaseInput: () => input.release(),
   ...(process.platform === 'darwin'
     ? {
@@ -552,9 +580,14 @@ export function registerRemoteDesktopIpc(
       permissionGuide: permissions.guideOpen,
       ...(checkWindowsSupport === true
         ? {
-            windowsSupport: windowsSetup.read().phase ? 'missing' : await readWindowsDesktopSupport(),
+            windowsSupport: windowsSetup.read().phase
+              ? 'missing'
+              : await readWindowsDesktopSupport(),
             windowsDevelopment: process.platform === 'win32' && !app.isPackaged,
             windowsSetup: windowsSetup.read(),
+            ...(process.platform === 'win32'
+              ? { windowsAutoUnlock: await windowsUnlock.read() }
+              : {}),
           }
         : {}),
     };
@@ -566,6 +599,8 @@ export function registerRemoteDesktopIpc(
     if (event.sender !== getDeepLinkMainWindow()?.webContents)
       throwIpcError('PERMISSION_DENIED', 'Windows desktop setup unavailable');
     try {
+      if (!enabled && (await windowsUnlock.read()).enabled)
+        await windowsUnlock.configure(false, 'en');
       await windowsSetup.run(enabled);
     } catch (error) {
       if (error instanceof Error && error.message === 'DESKTOP_NATIVE_BUILD_FAILED')
@@ -574,6 +609,26 @@ export function registerRemoteDesktopIpc(
     }
     windowsAvailable = enabled;
   });
+  ipcMain.handle(
+    DESKTOP_LOCAL.WINDOWS_AUTO_UNLOCK,
+    async (event, enabled: unknown, locale: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      if (
+        process.platform !== 'win32' ||
+        typeof enabled !== 'boolean' ||
+        typeof locale !== 'string' ||
+        !SUPPORTED_LOCALES.some((candidate) => candidate === locale)
+      )
+        throwIpcError('INVALID_PARAMS', 'Invalid Windows automatic unlock setting');
+      if (event.sender !== getDeepLinkMainWindow()?.webContents)
+        throwIpcError('PERMISSION_DENIED', 'Windows automatic unlock requires local settings');
+      try {
+        await windowsUnlock.configure(enabled, locale);
+      } catch {
+        throwIpcError('PRECONDITION_FAILED', 'Windows automatic unlock setup failed');
+      }
+    },
+  );
   ipcMain.handle(DESKTOP_LOCAL.ENABLE, async (event, enabled: unknown) => {
     assertTrustedAppRendererEvent(event);
     if (typeof enabled !== 'boolean') throwIpcError('INVALID_PARAMS', 'Invalid desktop setting');

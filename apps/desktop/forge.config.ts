@@ -652,6 +652,8 @@ function signPackagedExes(buildPath: string): void {
   const exes = [
     path.join(buildPath, `${CINDY_EXE}.exe`),
     path.join(buildPath, 'resources', UPDATER_EXE),
+    // This DLL is loaded by Windows LogonUI and uses the same signing identity.
+    path.join(buildPath, 'resources', 'tools', 'remote-desktop', 'cindy_windows_unlock.dll'),
     path.join(
       buildPath,
       'resources',
@@ -1112,11 +1114,15 @@ function buildRemoteDesktopInput(platform: ForgePlatform, arch: ForgeArch): void
   } else if (process.platform === 'win32' && platform === 'win32') {
     if (arch !== 'x64' && arch !== 'arm64') throw new Error('Unsupported Windows desktop architecture');
     const target = arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
-    for (const helper of ['windows-input', 'windows-host']) {
+    for (const helper of ['windows-input', 'windows-host', 'windows-unlock']) {
       const root = path.join(__dirname, 'native', 'remote-desktop', helper);
       const result = spawnSync('cargo', ['build', '--release', '--locked', '--target', target, '--manifest-path', path.join(root, 'Cargo.toml')], { stdio: 'inherit' });
       if (result.error || result.status !== 0) throw new Error(`Remote desktop ${helper} build failed`);
       const output = path.join(root, 'target', target, 'release');
+      if (helper === 'windows-unlock') {
+        fs.copyFileSync(path.join(output, 'cindy_windows_unlock.dll'), path.join(destDir, 'cindy_windows_unlock.dll'));
+        continue;
+      }
       const name = `cindy-windows-desktop-${helper === 'windows-input' ? 'input' : 'host'}`;
       fs.copyFileSync(path.join(output, `${name}.exe`), path.join(destDir, `${name}.exe`));
       if (helper === 'windows-host') fs.copyFileSync(path.join(output, 'cindy_windows_desktop_host.dll'), path.join(destDir, `${name}.node`));

@@ -1,5 +1,50 @@
 # Optional remote desktop automatic unlock
 
+## Windows host-local automatic unlock
+
+Windows has a separate, optional host-local workflow in **Settings → Remote
+control → Lock screen control**. Enable the system service first, then choose
+**Set password and enable** on the computer. A native Windows credential dialog
+collects and verifies the current Windows account password, not its Hello PIN.
+The password is stored only in Windows Credential Manager on that computer;
+disabling the option deletes it. JavaScript, mobile, the relay and Agent messages
+never receive the password. The target is scoped to the service installation,
+Cindy account/region, local profile and Windows user. Switching accounts cannot
+reuse the previous account's setting.
+
+When an already-authorized remote desktop viewer takes control, the native host
+can submit one short-lived unlock request before starting ordinary input. The
+optional credential-provider DLL is registered with the service and signed by
+the Windows package signing step. It is normally invisible: without a pending
+request it contributes no credential tile or default. It does not replace or
+filter Windows' own providers. Only the actual SYSTEM LogonUI process in the
+active console session can receive a one-shot credential from the broker. Windows
+performs authentication through Negotiate; Cindy verifies the unlocked session
+state instead of treating password verification or input delivery as success.
+
+This uses Microsoft's [credential-provider auto-logon contract](https://learn.microsoft.com/en-us/windows/win32/api/credentialprovider/nf-credentialprovider-icredentialprovider-getcredentialcount).
+Unlock is bound to a live authorized Main connection, session and expiring
+single-use request. Failed authentication stops attempts and clears the saved
+credential when the native caller receives the failure. Cancellation, disconnect
+or account changes invalidate pending work. Ordinary manual login remains
+available. No credentials are submitted for UAC, password changes, another OS
+user or pre-login/reboot access. This option acts when taking remote control; it
+does not continuously undo manual locks in the background.
+
+Dev compiles the provider alongside the host/input helpers. Service installation
+or update requires UAC; saving or deleting the per-user credential uses the
+native password dialog / Credential Manager. No Mobile native or wire-protocol
+change is required, so existing phone and desktop viewers use the host behavior.
+All work stays within the existing viewer lease; failure never resets another
+peer or the shared relay.
+
+Tests cover native credential packing with fake passwords, no-provider fallback,
+one-shot broker/pipe boundaries, settings with no renderer password field, account
+isolation and cancellation. **Actual credential-provider installation, real
+password setup, lock/unlock and Hello/Microsoft/domain-account variations still
+require Windows interactive acceptance.** Do not interpret compilation as proof
+that a real locked Windows session has been unlocked.
+
 ## Behavior
 
 Ordinary connections use existing account authorization. An unlocked Mac opens

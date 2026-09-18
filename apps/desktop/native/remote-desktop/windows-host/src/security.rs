@@ -112,6 +112,7 @@ pub fn protected_service() -> Result<Vec<Handle>> {
         crate::installation::HOST,
         crate::installation::INPUT,
         crate::installation::APPROVAL,
+        crate::unlock_protocol::PROVIDER_DLL,
     ] {
         paths.push(installation.directory.join(name));
     }
@@ -642,18 +643,20 @@ fn apply_descriptor(handle: HANDLE, descriptor: &str) -> Result<()> {
     let mut revision = 0;
     if unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) } == 0 {
         let code = unsafe { GetLastError() };
-        unsafe { LocalFree(sd); }
+        unsafe {
+            LocalFree(sd);
+        }
         return Err(io::Error::from_raw_os_error(code as i32));
     }
     let inheritance = if control & SE_DACL_PROTECTED != 0 {
         PROTECTED_DACL_SECURITY_INFORMATION
-    } else { UNPROTECTED_DACL_SECURITY_INFORMATION };
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
     let result = unsafe {
         SetKernelObjectSecurity(
             handle,
-            OWNER_SECURITY_INFORMATION
-                | DACL_SECURITY_INFORMATION
-                | inheritance,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | inheritance,
             sd,
         )
     };
@@ -1546,8 +1549,10 @@ mod tests {
         std::fs::write(child.join("app.asar"), b"fixture").unwrap();
         let sid = token_user_sid(
             token(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() })
-                .unwrap().0,
-        ).unwrap();
+                .unwrap()
+                .0,
+        )
+        .unwrap();
         // Test the protected case independently of the unprotected file above.
         for path in [&nested, &child] {
             secure_code_with_descriptor(path, &format!("O:{sid}D:P(A;;FA;;;{sid})")).unwrap();

@@ -124,7 +124,7 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
         .update(application)
         .update(executable)
         .update(runtime.arch);
-      for (const crate of ['windows-host', 'windows-input']) {
+      for (const crate of ['windows-host', 'windows-input', 'windows-unlock']) {
         const root = path.join(source, crate);
         const files = [
           'Cargo.toml',
@@ -177,7 +177,12 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
     const input = path.join(value.directory, 'cindy-windows-desktop-input.exe');
     const receipt = path.join(value.directory, 'ready');
     try {
-      await Promise.all([fs.access(result.binary), fs.access(result.addon), fs.access(input)]);
+      await Promise.all([
+        fs.access(result.binary),
+        fs.access(result.addon),
+        fs.access(input),
+        fs.access(path.join(value.directory, 'cindy_windows_unlock.dll')),
+      ]);
       if (
         receiptMatchesCheckout(
           await fs.readFile(receipt, 'utf8'),
@@ -235,10 +240,20 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
           [...args, '--manifest-path', path.join(value.source, 'windows-input', 'Cargo.toml')],
           env,
         );
+        stage = 'compilingUnlock';
+        progress?.('compilingUnlock');
+        await run(
+          [...args, '--manifest-path', path.join(value.source, 'windows-unlock', 'Cargo.toml')],
+          env,
+        );
         stage = 'publishing';
         await fs.copyFile(path.join(output, 'cindy-windows-desktop-host.exe'), result.binary);
         await fs.copyFile(path.join(output, 'cindy_windows_desktop_host.dll'), result.addon);
         await fs.copyFile(path.join(output, 'cindy-windows-desktop-input.exe'), input);
+        await fs.copyFile(
+          path.join(output, 'cindy_windows_unlock.dll'),
+          path.join(value.directory, 'cindy_windows_unlock.dll'),
+        );
         await fs.writeFile(
           receipt,
           encodeReceipt(value.application, value.executable, value.fingerprint),

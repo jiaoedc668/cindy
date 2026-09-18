@@ -3,6 +3,9 @@
 mod capture_protocol;
 mod installation;
 mod pipe;
+mod service_connection;
+mod unlock_credentials;
+mod unlock_protocol;
 mod win;
 use napi_derive::napi;
 use std::{

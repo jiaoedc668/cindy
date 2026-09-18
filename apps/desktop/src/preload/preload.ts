@@ -4326,6 +4326,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     dismissPermissionGuide: () => ipcRenderer.invoke(DESKTOP_LOCAL.DISMISS_GUIDE),
     enable: (enabled) => ipcRenderer.invoke(DESKTOP_LOCAL.ENABLE, enabled),
     windowsSupport: (enabled) => ipcRenderer.invoke(DESKTOP_LOCAL.WINDOWS_SUPPORT, enabled),
+    windowsAutoUnlock: (enabled, locale) => ipcRenderer.invoke(DESKTOP_LOCAL.WINDOWS_AUTO_UNLOCK, enabled, locale),
     stop: () => ipcRenderer.invoke(DESKTOP_LOCAL.STOP),
   } satisfies RemoteDesktopApi,
   deviceLink: {

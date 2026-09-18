@@ -56,6 +56,9 @@ describe('remote desktop state polling', () => {
         permissions: { guideOpen: false },
         readWindowsDesktopSupport,
         windowsSetup: { read: () => ({ phase: null, error: null, startedAt: null, revision: 0 }) },
+        windowsUnlock: {
+          read: async () => ({ enabled: false, available: false, busy: false, error: null }),
+        },
         throwIpcError: (code: string) => {
           throw new Error(code);
         },

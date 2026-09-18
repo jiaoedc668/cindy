@@ -3,6 +3,14 @@
     "attentionCount": "Tasks needing attention: {{count}}"
   },
   "remoteDesktop": {
+    "windowsCompilingUnlock": "Preparing automatic unlock…",
+    "windowsAutoUnlockTitle": "Automatically unlock computer",
+    "windowsAutoUnlockHint": "Unlock Windows when an authorized device connects, without entering a password on your phone.",
+    "windowsAutoUnlockStorage": "Windows encrypts the password on this PC only. It is never uploaded or synced. Turning this off deletes it. Enable lock screen control first.",
+    "windowsAutoUnlockSetup": "Set password and enable",
+    "windowsAutoUnlockClear": "Disable and delete password",
+    "windowsAutoUnlockSetupFailed": "Could not save the password. Enter your current Windows account password (not a PIN) in the system dialog and try again.",
+    "windowsAutoUnlockFailed": "Automatic unlock failed and further attempts stopped. Disable and set up the password again, or unlock manually.",
     "windowsPreparing": "Preparing background components…",
     "windowsCompilingHost": "Compiling the background service. First-time preparation may take a few minutes…",
     "windowsCompilingInput": "Compiling input components before requesting administrator authorization…",

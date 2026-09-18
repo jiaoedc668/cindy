@@ -116,9 +116,13 @@ impl Installation {
         format!(r"\\.\pipe\{}", self.name)
     }
     pub fn payload_is_current(&self, source: &Path) -> Result<bool> {
-        for name in [HOST, INPUT] {
+        for name in [HOST, INPUT, crate::unlock_protocol::PROVIDER_DLL] {
             let expected = std::fs::read(source.with_file_name(name))?;
-            let installed = std::fs::read(self.directory.join(name))?;
+            let installed = match std::fs::read(self.directory.join(name)) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e),
+            };
             if Sha256::digest(&expected) != Sha256::digest(&installed) {
                 return Ok(false);
             }

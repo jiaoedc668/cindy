@@ -3,6 +3,14 @@
     "attentionCount": "需要关注的任务：{{count}}"
   },
   "remoteDesktop": {
+    "windowsCompilingUnlock": "正在准备自动解锁组件…",
+    "windowsAutoUnlockTitle": "自动解锁电脑",
+    "windowsAutoUnlockHint": "开启后，已授权设备连接时自动解锁 Windows，无需在手机上输入密码。",
+    "windowsAutoUnlockStorage": "密码仅由 Windows 加密保存在这台电脑，不上传或同步。关闭时清除密码。需先开启锁屏控制。",
+    "windowsAutoUnlockSetup": "设置密码并开启",
+    "windowsAutoUnlockClear": "关闭并清除密码",
+    "windowsAutoUnlockSetupFailed": "未能保存密码。请在系统窗口输入当前 Windows 账户密码（不是 PIN）后重试。",
+    "windowsAutoUnlockFailed": "自动解锁失败，已停止尝试。请关闭后重新设置密码；仍可手动解锁。",
     "windowsPreparing": "正在准备后台组件，请稍候…",
     "windowsCompilingHost": "正在编译后台服务，首次准备可能需要几分钟…",
     "windowsCompilingInput": "正在编译输入组件，即将请求管理员授权…",

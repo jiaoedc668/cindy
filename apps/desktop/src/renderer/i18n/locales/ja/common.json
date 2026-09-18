@@ -3,6 +3,14 @@
     "attentionCount": "対応が必要なセッション：{{count}}"
   },
   "remoteDesktop": {
+    "windowsCompilingUnlock": "自動ロック解除を準備中…",
+    "windowsAutoUnlockTitle": "コンピューターを自動ロック解除",
+    "windowsAutoUnlockHint": "許可したデバイスの接続時に Windows のロックを自動解除します。スマートフォンでのパスワード入力は不要です。",
+    "windowsAutoUnlockStorage": "パスワードは Windows によりこの PC にのみ暗号化して保存され、アップロードや同期はされません。オフにすると削除されます。先にロック画面の操作を有効にしてください。",
+    "windowsAutoUnlockSetup": "パスワードを設定して有効にする",
+    "windowsAutoUnlockClear": "無効にしてパスワードを削除",
+    "windowsAutoUnlockSetupFailed": "パスワードを保存できませんでした。システム画面で現在の Windows アカウントのパスワード（PIN ではありません）を入力し、再試行してください。",
+    "windowsAutoUnlockFailed": "自動ロック解除に失敗したため、試行を停止しました。オフにしてパスワードを再設定するか、手動でロックを解除してください。",
     "windowsPreparing": "バックグラウンドコンポーネントを準備中…",
     "windowsCompilingHost": "バックグラウンドサービスをコンパイル中。初回は数分かかる場合があります…",
     "windowsCompilingInput": "入力コンポーネントをコンパイル中。続いて管理者の承認を求めます…",
