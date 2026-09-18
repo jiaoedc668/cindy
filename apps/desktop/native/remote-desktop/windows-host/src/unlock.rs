@@ -64,21 +64,22 @@ pub fn locked(session: u32) -> Result<bool> {
         return Err(error());
     }
     let result = unsafe {
-        if bytes < mem::size_of::<WTSINFOEXW>() as u32 {
+        if raw.is_null() || bytes < mem::size_of::<WTSINFOEXW>() as u32 {
             denied()
         } else {
-            let info = &*(raw as *const WTSINFOEXW);
-            if info.Level != 1
-                || info.Data.WTSInfoExLevel1.SessionId != session
-                || info.Data.WTSInfoExLevel1.SessionState != WTSActive
-            {
-                denied()
-            } else {
-                match info.Data.WTSInfoExLevel1.SessionFlags {
-                    0 => Ok(true),
-                    1 => Ok(false),
-                    _ => denied(),
+            match (raw as *const WTSINFOEXW).as_ref() {
+                Some(info)
+                    if info.Level == 1
+                        && info.Data.WTSInfoExLevel1.SessionId == session
+                        && info.Data.WTSInfoExLevel1.SessionState == WTSActive =>
+                {
+                    match info.Data.WTSInfoExLevel1.SessionFlags {
+                        0 => Ok(true),
+                        1 => Ok(false),
+                        _ => denied(),
+                    }
                 }
+                _ => denied(),
             }
         }
     };

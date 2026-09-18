@@ -561,10 +561,12 @@ paths, compiler output, environment variables and input are not logged. Generate
 are cached under userData by native source/runtime fingerprint, so a loaded Node
 addon is not overwritten. Normal source edits and Dev restarts reuse the grant;
 each settings poll and setup re-reads native source so a fingerprint change
-invalidates the cache without restarting Desktop. Uninstall, status and the ready-path probe still
+invalidates the cache without restarting Desktop. Uninstall and the ready-path probe still
 use the last prepared helper for this checkout and Electron executable, so a
 compiler failure or deleted current cache does not block removing that
-checkout's auto-start SYSTEM service. Shared userData cannot pick a newer
+checkout's auto-start SYSTEM service. Status reports `updateRequired` when that
+fallback helper is current but the Dev fingerprint has changed, so settings
+offers Update rather than Remove. Shared userData cannot pick a newer
 helper from another checkout. Changed native service
 binaries show an update action requiring administrator approval. The broker checks the approved Windows user and exact bound Electron
 image. An `electron .` entry is resolved against the process's actual working

@@ -94,7 +94,7 @@ pub fn install() -> Result<()> {
             manager.0,
             name.as_ptr(),
             display_name.as_ptr(),
-            SERVICE_START | SERVICE_QUERY_STATUS,
+            SERVICE_START | SERVICE_QUERY_STATUS | SERVICE_STOP | DELETE,
             SERVICE_WIN32_OWN_PROCESS,
             SERVICE_AUTO_START,
             SERVICE_ERROR_NORMAL,
@@ -106,6 +106,7 @@ pub fn install() -> Result<()> {
             ptr::null(),
         )
     };
+    let created = !raw.is_null();
     let installed = if raw.is_null() {
         if unsafe { GetLastError() } != ERROR_SERVICE_EXISTS {
             return Err(error());
@@ -114,19 +115,29 @@ pub fn install() -> Result<()> {
     } else {
         ServiceHandle(raw)
     };
-    if unsafe { StartServiceW(installed.0, 0, ptr::null()) } == 0
-        && unsafe { GetLastError() } != ERROR_SERVICE_ALREADY_RUNNING
-    {
-        return Err(error());
-    }
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while Instant::now() < deadline {
-        if pid().is_ok() {
-            return Ok(());
+    let start_error = if unsafe { StartServiceW(installed.0, 0, ptr::null()) } == 0 {
+        let code = unsafe { GetLastError() };
+        (code != ERROR_SERVICE_ALREADY_RUNNING).then(|| io::Error::from_raw_os_error(code as i32))
+    } else {
+        None
+    };
+    if start_error.is_none() {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            if pid().is_ok() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        std::thread::sleep(Duration::from_millis(100));
     }
-    Err(io::Error::from(io::ErrorKind::TimedOut))
+    // A newly created AUTO_START service must not remain registered if it never
+    // reached RUNNING. An already-registered service is left for the next update.
+    if created {
+        let mut status: SERVICE_STATUS = unsafe { mem::zeroed() };
+        let _ = unsafe { ControlService(installed.0, SERVICE_CONTROL_STOP, &mut status) };
+        let _ = unsafe { DeleteService(installed.0) };
+    }
+    Err(start_error.unwrap_or_else(|| io::Error::from(io::ErrorKind::TimedOut)))
 }
 pub fn uninstall() -> Result<()> {
     let manager = manager(SC_MANAGER_CONNECT)?;

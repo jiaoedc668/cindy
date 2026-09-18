@@ -85,7 +85,8 @@ export async function loadWindowsUnlockNative(): Promise<{
 export async function readWindowsDesktopSupport(): Promise<WindowsDesktopSupport | undefined> {
   if (process.platform !== 'win32') return undefined;
   try {
-    const native = await helper();
+    const current = await assets();
+    const native = current ?? (await helper());
     if (!native) return 'missing';
     const { stdout } = await exec(native.binary, ['--status'], {
       timeout: REMOTE_DESKTOP_OFFER_BUDGET.platformStatusMs,
@@ -100,6 +101,10 @@ export async function readWindowsDesktopSupport(): Promise<WindowsDesktopSupport
       } catch {
         return 'missing';
       }
+      // A previous checkout-bound helper can still talk to the installed
+      // service. Do not report ready: settings must offer Update, while
+      // uninstall still uses helper() without rebuilding.
+      if (!current) return 'updateRequired';
     }
     return status === 'ready' ||
       status === 'missing' ||

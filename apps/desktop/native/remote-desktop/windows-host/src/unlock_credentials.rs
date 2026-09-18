@@ -85,21 +85,25 @@ fn read(name: &str) -> Result<Option<SavedCredential>> {
             Err(error())
         };
     }
+    if raw.is_null() {
+        return denied();
+    }
     let result = unsafe {
-        let value = &mut *raw;
-        let result = if value.CredentialBlobSize as usize > MAX_SECRET_BYTES
-            || value.CredentialBlob.is_null()
-        {
-            denied()
-        } else {
-            let bytes = std::slice::from_raw_parts_mut(
-                value.CredentialBlob,
-                value.CredentialBlobSize as usize,
-            );
-            let result = serde_json::from_slice::<SavedCredential>(bytes)
-                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData));
-            bytes.zeroize();
-            result
+        let result = match raw.as_mut() {
+            Some(value)
+                if (value.CredentialBlobSize as usize) <= MAX_SECRET_BYTES
+                    && !value.CredentialBlob.is_null() =>
+            {
+                let bytes = std::slice::from_raw_parts_mut(
+                    value.CredentialBlob,
+                    value.CredentialBlobSize as usize,
+                );
+                let parsed = serde_json::from_slice::<SavedCredential>(bytes)
+                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData));
+                bytes.zeroize();
+                parsed
+            }
+            _ => denied(),
         };
         CredFree(raw.cast());
         result

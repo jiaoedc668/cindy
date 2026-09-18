@@ -125,7 +125,7 @@ describe('Windows lock screen service setup', () => {
     };
     runtime.installed.mockResolvedValue(installed);
     runtime.exec.mockResolvedValue({ stdout: 'ready\n' });
-    expect(await readWindowsDesktopSupport()).toBe('ready');
+    expect(await readWindowsDesktopSupport()).toBe('updateRequired');
     expect(runtime.development).toHaveBeenCalledWith(false);
     expect(runtime.exec.mock.calls[0][0]).toBe(installed.binary);
     expect(runtime.open).toHaveBeenCalledWith(

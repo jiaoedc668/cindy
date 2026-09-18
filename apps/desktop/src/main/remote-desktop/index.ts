@@ -143,18 +143,20 @@ const windowsUnlock = new WindowsAutoUnlock({
   scope: () => {
     if (process.platform !== 'win32') return null;
     const identity = remoteCredentialHost.currentToken?.();
-    return identity
-      ? createHash('sha256')
-          .update(
-            JSON.stringify([
-              identity.realm,
-              identity.membership,
-              identity.authDevice,
-              app.getPath('userData'),
-            ]),
-          )
-          .digest('hex')
-      : null;
+    if (!identity) return null;
+    // Public account/device/profile identifiers namespace the local vault entry.
+    // This is not a password or credential secret.
+    // codeql[js/insufficient-password-hash]
+    return createHash('sha256')
+      .update(
+        JSON.stringify([
+          identity.realm,
+          identity.membership,
+          identity.authDevice,
+          app.getPath('userData'),
+        ]),
+      )
+      .digest('hex');
   },
 });
 function stopVideo(): void {
