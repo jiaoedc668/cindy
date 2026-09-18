@@ -769,6 +769,46 @@ describe("remote desktop controls", () => {
       audio: false,
     });
   });
+  it.each([true, false])(
+    "restores browser PiP's prior control choice (%s) without clearing the preference",
+    async (controlling) => {
+      await connect();
+      const web = async (
+        type: string,
+        values: Record<string, unknown> = {},
+      ) => {
+        await act(async () =>
+          fixture.message!({
+            nativeEvent: {
+              data: JSON.stringify({ type, epoch: "lease", ...values }),
+            },
+          }),
+        );
+      };
+      await web("pipCapability", { supported: true });
+      act(() => button("operations").click());
+      if (!controlling) await act(async () => button("viewOnly").click());
+      await act(async () => button("smallWindow").click());
+      await web("presentation", { active: true });
+      fixture.invoke.mockClear();
+      await web("presentation", { active: false });
+      await web("presentation", { active: false });
+      expect(fixture.pipEnabled).toBe(true);
+      if (controlling) {
+        expect(
+          requests().filter((r) => r.op === "control" && r.enabled),
+        ).toHaveLength(1);
+      } else {
+        expect(
+          requests().filter((r) => r.op === "control" && r.enabled),
+        ).toHaveLength(0);
+        expect(
+          requests().filter((r) => r.op === "presentation" && !r.enabled),
+        ).toHaveLength(1);
+      }
+      expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+    },
+  );
   it("keeps the background option and restores control after returning fullscreen", async () => {
     const viewer = await retainedViewer();
     const controls = requests().filter(

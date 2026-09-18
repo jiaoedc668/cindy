@@ -845,7 +845,6 @@ export function RemoteDesktopSession({
   const restoreInlinePresentation = () => {
     const current = active.current;
     if (
-      !NativeRemoteDesktopView ||
       !current ||
       (!pipPrepared.current && !restoreAfterPipDisabled.current) ||
       presentation.current ||
@@ -1657,17 +1656,15 @@ export function RemoteDesktopSession({
           recovery.current.enabled = false;
           void stop(false, true);
           navigation.current.onEnded?.();
-        } else if (!presentation.current && NativeRemoteDesktopView) {
+        } else if (!presentation.current) {
           restoreInlinePresentationRef.current();
-        } else if (!presentation.current && !pipEnabledRef.current) {
-          void request({
-            op: "presentation",
-            lease: current.lease,
-            enabled: false,
-          }).catch(() => {});
           if (!NativeRemoteDesktopView && !videoSettingsRef.current.audio)
             void remotePresentation?.playback(false).catch(() => {});
-          if (AppState.currentState === "background") pause();
+          if (
+            !NativeRemoteDesktopView &&
+            AppState.currentState === "background"
+          )
+            pause();
         }
         break;
       case "presentationRestore":
