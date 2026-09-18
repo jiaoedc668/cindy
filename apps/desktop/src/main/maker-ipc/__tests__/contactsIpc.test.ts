@@ -25,11 +25,6 @@ vi.mock('../../contacts-sync/driver.js', () => ({
   setContactsDeviceSyncEnabled: vi.fn(),
 }));
 
-vi.mock('../../maker-host/index.js', () => ({
-  restartCodexAfterAuthModeChange: vi.fn(async () => { throw new Error('control RPC busy'); }),
-}));
-vi.mock('../../mcp-integrations/codexEnvironment.js', () => ({ shutdownCodexEnvironment: vi.fn() }));
-vi.mock('../register.js', () => ({ scheduleDeferredCodexRestart: vi.fn() }));
 vi.mock('../../security/trustedAppRenderer.js', () => ({ assertTrustedAppRendererEvent: vi.fn() }));
 vi.mock('../../maker-host/contacts-settings-store.js', () => ({
   readContactsSettingsState: () => ({ value: { enabled: false }, isCustomized: false }),
@@ -38,12 +33,18 @@ vi.mock('../../maker-host/contacts-settings-store.js', () => ({
 
 import { ipcMain } from 'electron';
 import * as appSessionState from '../../appSessionState.js';
-import { restartCodexAfterAuthModeChange } from '../../maker-host/index.js';
-import { shutdownCodexEnvironment } from '../../mcp-integrations/codexEnvironment.js';
 import { writeContactsEnabled } from '../../maker-host/contacts-settings-store.js';
-import { scheduleDeferredCodexRestart } from '../register.js';
 import { createContactsIpcHandlers, registerContactsIpc } from '../contacts-ipc.js';
 import { MAKER_INVOKE } from '../channels.js';
+
+const runtime = {
+  restartCodexAfterAuthModeChange: vi.fn<(refresh: () => Promise<void>) => Promise<void>>(
+    async () => { throw new Error('control RPC busy'); },
+  ),
+  shutdownCodexEnvironment: vi.fn(async () => {}),
+  scheduleDeferredCodexRestart: vi.fn(),
+  invalidatePiEnvironment: vi.fn(),
+};
 
 function noopLogger() {
   const noop = () => {};
@@ -107,7 +108,7 @@ describe('contacts-ipc handlers', () => {
   });
 
   it('production wiring retains the bridge and schedules idle retry after a persisted toggle meets busy RPC', async () => {
-    registerContactsIpc();
+    registerContactsIpc(runtime);
     const handler = vi.mocked(ipcMain.handle).mock.calls.find(
       ([channel]) => channel === MAKER_INVOKE.CONTACTS_SETTINGS_SET,
     )![1];
@@ -115,26 +116,46 @@ describe('contacts-ipc handlers', () => {
       enabled: true, codexMcpRefreshed: false,
     });
     expect(writeContactsEnabled).toHaveBeenCalledWith(true);
-    expect(shutdownCodexEnvironment).not.toHaveBeenCalled();
-    expect(scheduleDeferredCodexRestart).toHaveBeenCalledWith('Contacts MCP configuration changed');
+    expect(runtime.shutdownCodexEnvironment).not.toHaveBeenCalled();
+    expect(runtime.scheduleDeferredCodexRestart).toHaveBeenCalledWith('Contacts MCP configuration changed');
+  });
+
+  it('uses injected runtime dependencies to refresh the bridge under the guard before Pi invalidation', async () => {
+    const order: string[] = [];
+    runtime.restartCodexAfterAuthModeChange.mockImplementationOnce(async (refresh) => {
+      order.push('guard');
+      await refresh();
+      order.push('release');
+    });
+    runtime.shutdownCodexEnvironment.mockImplementationOnce(async () => { order.push('bridge'); });
+    runtime.invalidatePiEnvironment.mockImplementationOnce(() => { order.push('pi'); });
+    registerContactsIpc(runtime);
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(
+      ([channel]) => channel === MAKER_INVOKE.CONTACTS_SETTINGS_SET,
+    )![1];
+    await expect(handler({} as Electron.IpcMainInvokeEvent, true)).resolves.toEqual({
+      enabled: true, codexMcpRefreshed: true,
+    });
+    expect(order).toEqual(['guard', 'bridge', 'release', 'pi']);
+    expect(runtime.scheduleDeferredCodexRestart).not.toHaveBeenCalled();
   });
 
   it.each(['pending', 'changed'] as const)('does not re-register a late refresh after owner boundary is %s', async (boundary) => {
     const scope = vi.spyOn(appSessionState, 'activeOwnerScopeKey').mockReturnValue('owner-a');
     const pending = vi.spyOn(appSessionState, 'isAppSessionBoundaryPending').mockReturnValue(false);
-    vi.mocked(restartCodexAfterAuthModeChange).mockImplementationOnce(async () => {
+    runtime.restartCodexAfterAuthModeChange.mockImplementationOnce(async () => {
       if (boundary === 'pending') pending.mockReturnValue(true);
       else scope.mockReturnValue('owner-b');
       throw new Error('old owner refresh failed');
     });
-    registerContactsIpc();
+    registerContactsIpc(runtime);
     const handler = vi.mocked(ipcMain.handle).mock.calls.find(
       ([channel]) => channel === MAKER_INVOKE.CONTACTS_SETTINGS_SET,
     )![1];
     await expect(handler({} as Electron.IpcMainInvokeEvent, true)).resolves.toEqual({
       enabled: true, codexMcpRefreshed: false,
     });
-    expect(scheduleDeferredCodexRestart).not.toHaveBeenCalled();
+    expect(runtime.scheduleDeferredCodexRestart).not.toHaveBeenCalled();
   });
 
   it('开关落盘失败按 [CODE] 协议上抛, 不漏裸 Error(规则 13)', async () => {

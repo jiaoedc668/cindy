@@ -287,7 +287,7 @@ import {
 } from './rsb-browser-bridge/native-popup-surfaces.js';
 import { disposeAndroidAdb } from './mcp-integrations/android.js';
 import { shutdownCodexEnvironment } from './mcp-integrations/codexEnvironment.js';
-import { shutdownPiEnvironment } from './mcp-integrations/piEnvironment.js';
+import { invalidatePiEnvironment, shutdownPiEnvironment } from './mcp-integrations/piEnvironment.js';
 import { fetchRemoteMediaImageBytes } from './device-link/remoteMediaProtocol';
 import * as imageCacheStore from './imageCacheStore';
 import {
@@ -674,6 +674,7 @@ import {
   anySessionInTurn,
   applyCodexSpawnConfigChangeWithRestart,
   clearDeferredCodexRestartForOwnerBoundary,
+  scheduleDeferredCodexRestart,
   clearWorkingDirectoryRecoveryForOwnerBoundary,
   collectAgentInputQueueScanTexts,
   createAutomationUserTurnGitBaselineHooks,
@@ -4826,7 +4827,12 @@ const registerIpcHandlers = () => {
   });
 
   // 智能通讯录 IPC —— 设置开关 + 数据 CRUD(设置页管理 UI 通道), 提前注册。
-  registerContactsIpc();
+  registerContactsIpc({
+    restartCodexAfterAuthModeChange,
+    shutdownCodexEnvironment,
+    scheduleDeferredCodexRestart,
+    invalidatePiEnvironment,
+  });
 
   // 聊天嵌入开关 IPC —— 与 compat-mode 同理提前注册:
   // renderer 启动 bootstrap 同步 localStorage 镜像, 远早于 splash 完成。

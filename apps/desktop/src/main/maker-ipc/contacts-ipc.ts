@@ -338,8 +338,13 @@ function broadcastContactsSyncStatus(status: unknown): void {
   }
 }
 
-/** bootstrap-electron 启动期调一次: 组装 desktop deps + ipcMain.handle 接线 */
-export function registerContactsIpc(): void {
+/** Bootstrap supplies static runtime dependencies, avoiding a contacts → Maker import cycle. */
+export function registerContactsIpc(runtime: {
+  restartCodexAfterAuthModeChange(refreshEnvironment: () => Promise<void>): Promise<void>;
+  shutdownCodexEnvironment(): Promise<void>;
+  scheduleDeferredCodexRestart(reason: string): void;
+  invalidatePiEnvironment(): void;
+}): void {
   const handlers = createContactsIpcHandlers({
     getManager: getDesktopContactsManager,
     readSettingsState: readContactsSettingsState,
@@ -355,21 +360,15 @@ export function registerContactsIpc(): void {
     // 与 register.ts 自定义 MCP CRUD 的 invalidateCodex 同款语义与顺序: 先 dispose
     // app-server(含 busy 检查), 成功后再关 bridge/清 cache —— 若先关 bridge 而 dispose
     // 失败(busy), running 会话的 mcp_servers URL 会指向已停的 bridge。
-    // 动态 import 破环: contacts-ipc 被 mcp-providers 静态引用, 而 maker-host/index
-    // 又引 mcp-providers, 这里静态 import maker-host/index 会成环(同 mcp-providers
-    // 内 remote-ssh 的先例)。
     // 契约: 任一步失败都 rethrow(见 ContactsIpcDeps.invalidateCodexMcp 注释),
     // handler 把失败折成 codexMcpRefreshed:false 由 renderer 提示延迟生效。
     invalidateCodexMcp: async () => {
       const ownerScopeKey = activeOwnerScopeKey();
-      const { scheduleDeferredCodexRestart } = await import('./register.js');
       try {
-        const { restartCodexAfterAuthModeChange } = await import('../maker-host/index.js');
-        const { shutdownCodexEnvironment } = await import('../mcp-integrations/codexEnvironment.js');
-        await restartCodexAfterAuthModeChange(shutdownCodexEnvironment);
+        await runtime.restartCodexAfterAuthModeChange(runtime.shutdownCodexEnvironment);
       } catch (err) {
         if (!isAppSessionBoundaryPending() && activeOwnerScopeKey() === ownerScopeKey) {
-          scheduleDeferredCodexRestart('Contacts MCP configuration changed');
+          runtime.scheduleDeferredCodexRestart('Contacts MCP configuration changed');
         }
         log.warn(
           'restartCodexAfterAuthModeChange on contacts toggle failed — idle retry if owner is still current',
@@ -382,8 +381,7 @@ export function registerContactsIpc(): void {
       try {
         // Codex 与 Pi 各自的 MCP bridge 都在首个会话冻结 server 集合;contacts 开关变更后
         // 两者都要 invalidate,否则新会话仍暴露已禁用的 contacts server(Pi 侧 codex review P1)。
-        const { invalidatePiEnvironment } = await import('../mcp-integrations/piEnvironment.js');
-        invalidatePiEnvironment();
+        runtime.invalidatePiEnvironment();
       } catch (err) {
         log.warn(
           'shutdown agent MCP environments on contacts toggle failed — cached spawn config still stale',
