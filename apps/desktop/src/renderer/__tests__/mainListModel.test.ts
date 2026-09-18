@@ -16,6 +16,7 @@ import {
   holdViewedPriorityRank,
   sessionPriorityRecencyMs,
   sessionPriorityRank,
+  sortSessionsForMainList,
   splitEntriesByDevice,
   type MainListEntry,
 } from '../features/cc-agent/lib/mainListModel';
@@ -1042,4 +1043,29 @@ it('keeps manual project order while creation-time tasks stay stable inside each
   const activityOrder = buildMainListEntries({ ...input, sortBy: 'recency' });
   expect(labels(activityOrder)).toEqual(['p:beta', 'p:alpha']);
   expect(getMainListEntrySessions(activityOrder[1]).map((s) => s.id)).toEqual(['old', 'recent']);
+});
+
+
+describe('per-sort numeric keys', () => {
+  it('reads each activity key a bounded number of times and observes later in-place updates', () => {
+    let reads = 0;
+    const rows = Array.from({ length: 100 }, (_, i) => {
+      const row = session({ id: String(i), updatedAt: new Date(i * 1000).toISOString() });
+      let value = row.updatedAt;
+      Object.defineProperty(row, 'updatedAt', { get: () => { reads++; return value; }, set: (v) => { value = v; } });
+      return row;
+    });
+    expect(sortSessionsForMainList(rows, 'recency')[0].id).toBe('99');
+    expect(reads).toBe(100);
+    rows[0].updatedAt = '2030-01-01T00:00:00Z';
+    expect(sortSessionsForMainList(rows, 'recency')[0].id).toBe('0');
+  });
+  it('preserves stable ties, created-id ties and invalid userSendAt semantics', () => {
+    const a = session({ id: 'z', updatedAt: '2026-01-01T00:00:00Z' });
+    const b = session({ id: 'a', updatedAt: a.updatedAt });
+    const invalid = session({ id: 'invalid', updatedAt: '2030-01-01T00:00:00Z', userSendAt: 'invalid' });
+    expect(sortSessionsForMainList([a, b, invalid], 'recency').map(x => x.id)).toEqual(['z', 'a', 'invalid']);
+    expect(sortSessionsForMainList([a, b], 'created').map(x => x.id)).toEqual(['a', 'z']);
+    expect(sortSessionsForMainList([a, b], 'priority').map(x => x.id)).toEqual(['z', 'a']);
+  });
 });

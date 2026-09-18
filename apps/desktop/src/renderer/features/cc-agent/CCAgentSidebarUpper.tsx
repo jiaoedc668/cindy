@@ -43,6 +43,7 @@ import {
   X,
 } from 'lucide-react';
 import { useNavigate, useMatch, useLocation } from 'react-router-dom';
+import { useSidebarNavigate } from './sidebar/sidebarNavigation';
 import { useTranslation } from 'react-i18next';
 import { projectDraftSessionTitle } from '@cindy/maker-shared/session-title';
 
@@ -505,7 +506,7 @@ export function CCAgentSidebarUpper() {
     }
     return next;
   }, [scheduleSessionIndex, remoteScheduleIndex]);
-  const navigate = useNavigate();
+  const navigate = useSidebarNavigate();
 
   // Workdir-browse mode (skillhub Market sidebar pattern). When the user
   // clicked the file-text button on a Project, we swap sidebar contents to
@@ -1571,27 +1572,18 @@ function ExpandedView({
     [pinnedProjectKeys, localPlatform],
   );
 
-  const restorableProjectKeys = useMemo(
-    () =>
-      collectRestorableProjectKeys({
-        sessions: scopedSidebarSessions,
-        persistentLocalProjects: visiblePersistentLocalProjects,
-        lastActivityCutoff: cutoffForLastActivity(filter.lastActivity),
-        pinnedProjectKeys,
-        vendorPredicate,
-        localPlatform,
-      }),
-    [
-      filter.lastActivity,
-      localPlatform,
+  // Only the directory-picker restore path needs this catalogue. Read the
+  // latest inputs after its await instead of grouping twice on every patch.
+  const collectRestorableProjectKeysRef = useRef<() => ReadonlySet<string>>(() => new Set());
+  collectRestorableProjectKeysRef.current = () =>
+    collectRestorableProjectKeys({
+      sessions: scopedSidebarSessions,
+      persistentLocalProjects: visiblePersistentLocalProjects,
+      lastActivityCutoff: cutoffForLastActivity(filter.lastActivity),
       pinnedProjectKeys,
-      scopedSidebarSessions,
       vendorPredicate,
-      visiblePersistentLocalProjects,
-    ],
-  );
-  const restorableProjectKeysRef = useRef(restorableProjectKeys);
-  restorableProjectKeysRef.current = restorableProjectKeys;
+      localPlatform,
+    });
   const hiddenProjectComparisonKeys = useMemo(
     () => buildProjectKeyComparisonSet(hiddenProjectKeys, localPlatform),
     [hiddenProjectKeys, localPlatform],
@@ -1843,9 +1835,10 @@ function ExpandedView({
     !(selectedMachineId !== MACHINE_ALL && selectedMachineId.length === 1);
 
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
-  const [selectionAnchorSessionId, setSelectionAnchorSessionId] = useState<string | null>(null);
+  // The range-selection anchor is interaction bookkeeping, never rendered.
+  const selectionAnchorSessionIdRef = useRef<string | null>(null);
   // 这几个值 handleSessionClick 只在「点击那一刻」读一次。留在它的 deps 里会让
-  // 每次点击(:setSelectionAnchorSessionId 必触发)和每次切换都重建 handler,
+  // 每次切换都重建 handler,
   // 行的 onClick 跟着换引用 → 整表 memo 失效重画一遍(SessionItem.tsx 不变量 #3)。
   // 经 ref 读还顺带避开闭包陈旧:拿到的是最新值而非渲染时快照。
   // attention / running / 未读集合更是:点进去会先清通知,若留在 deps 里,刚点的
@@ -1865,8 +1858,6 @@ function ExpandedView({
   viewedSessionIdRef.current = viewedSessionId;
   const selectedSessionIdsRef = useRef(selectedSessionIds);
   selectedSessionIdsRef.current = selectedSessionIds;
-  const selectionAnchorSessionIdRef = useRef(selectionAnchorSessionId);
-  selectionAnchorSessionIdRef.current = selectionAnchorSessionId;
   const [bulkActionPending, setBulkActionPending] = useState<BulkSessionAction | null>(null);
   const sidebarScrollRef = useRef<HTMLDivElement>(null);
   /**
@@ -2065,7 +2056,12 @@ function ExpandedView({
       const next = new Set([...prev].filter((id) => renderedSessionIds.has(id)));
       return sameStringSet(prev, next) ? prev : next;
     });
-    setSelectionAnchorSessionId((prev) => (prev && renderedSessionIds.has(prev) ? prev : null));
+    if (
+      selectionAnchorSessionIdRef.current &&
+      !renderedSessionIds.has(selectionAnchorSessionIdRef.current)
+    ) {
+      selectionAnchorSessionIdRef.current = null;
+    }
   }, []);
 
   // 只在真有多选集合时才盯 DOM。单击也会写下 selectionAnchorSessionId 当
@@ -2084,7 +2080,7 @@ function ExpandedView({
 
   const handleClearSelection = useCallback(() => {
     setSelectedSessionIds((prev) => (prev.size === 0 ? prev : new Set()));
-    setSelectionAnchorSessionId((prev) => (prev === null ? prev : null));
+    selectionAnchorSessionIdRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -2179,7 +2175,7 @@ function ExpandedView({
             }
             return next;
           });
-          setSelectionAnchorSessionId((prev) => prev ?? id);
+          selectionAnchorSessionIdRef.current ??= id;
           return;
         }
 
@@ -2192,14 +2188,14 @@ function ExpandedView({
           }
           return next;
         });
-        setSelectionAnchorSessionId(id);
+        selectionAnchorSessionIdRef.current = id;
         return;
       }
 
       if (selectedSessionIdsRef.current.size > 0) {
         setSelectedSessionIds(new Set());
       }
-      setSelectionAnchorSessionId(id);
+      selectionAnchorSessionIdRef.current = id;
       // 清点会先于路由更新抹掉 attention。必须先按当前档位钉住,否则
       // ProjectsSection 首次 hold 只能读到 rest,刚打开的完成未读仍会立刻沉底。
       const waiting = new Set(urgentSetRef.current);
@@ -2225,7 +2221,9 @@ function ExpandedView({
       clearSystemSessionAttention(id);
       if (id === activeSessionIdRef.current) return; // No duplicate navigate.
       if (import.meta.env.DEV) perfLog.debug(`sidebar:click sid=${id}`); // 纯诊断,生产剔除
-      navigate(await resolveSessionRoute(id, target));
+      // Known ordinary tasks can navigate in the current click batch.
+      if (target && !isOrcaWorkerSession(target)) navigate(`/cc-agent/${id}`);
+      else navigate(await resolveSessionRoute(id, target));
     },
     [navigate, clearNotification, markAutomationSessionRunsRead],
   );
@@ -2428,7 +2426,7 @@ function ExpandedView({
             localPlatform,
           ),
           setProjectHidden,
-          getCurrentProjectKeys: () => restorableProjectKeysRef.current,
+          getCurrentProjectKeys: () => collectRestorableProjectKeysRef.current(),
           ensureProjectIncluded: filter.ensureProjectIncluded,
           localPlatform,
         });
@@ -2554,6 +2552,7 @@ function ExpandedView({
       };
 
       // 优先用 active session(若属于这个 project)。
+      const activeSessionId = activeSessionIdRef.current;
       if (activeSessionId) {
         const active = sessions.find((s) => s.id === activeSessionId);
         if (active && inProject(active)) {
@@ -2569,7 +2568,7 @@ function ExpandedView({
       }
       toast.warning(t('ccAgent.sidebar.browseEmpty'));
     },
-    [activeSessionId, sessions, navigate, t],
+    [sessions, navigate, t],
   );
 
   /* ---- Rename handler ---- */
@@ -2611,7 +2610,7 @@ function ExpandedView({
         throw err;
       }
     },
-    [projectAliases, t],
+    [projectAliases.updateAlias, t],
   );
 
   const handleRemoveProjectFromSidebar = useCallback(
@@ -2699,7 +2698,7 @@ function ExpandedView({
         toast.error(t('ccAgent.sidebar.pinFailed'));
       }
     },
-    [filter, t],
+    [filter.removePin, filter.promotePin, t],
   );
 
   // Event-only state: metadata updates recreate the collapsed Set even when
@@ -3012,7 +3011,12 @@ function ExpandedView({
         for (const id of succeededIds) next.delete(id);
         return next;
       });
-      setSelectionAnchorSessionId((prev) => (prev && succeededIds.has(prev) ? null : prev));
+      if (
+        selectionAnchorSessionIdRef.current &&
+        succeededIds.has(selectionAnchorSessionIdRef.current)
+      ) {
+        selectionAnchorSessionIdRef.current = null;
+      }
 
       if (failed.length === 0) {
         toast.success(t('ccAgent.sidebar.bulkSelection.deleted', { count: succeededIds.size }));
@@ -3148,7 +3152,12 @@ function ExpandedView({
         for (const id of succeededIds) next.delete(id);
         return next;
       });
-      setSelectionAnchorSessionId((prev) => (prev && succeededIds.has(prev) ? null : prev));
+      if (
+        selectionAnchorSessionIdRef.current &&
+        succeededIds.has(selectionAnchorSessionIdRef.current)
+      ) {
+        selectionAnchorSessionIdRef.current = null;
+      }
 
       if (failed.length === 0) {
         toast.success(t('ccAgent.sidebar.bulkSelection.archived', { count: succeededIds.size }));
@@ -3323,7 +3332,8 @@ function ExpandedView({
 
       // 当前注视中的 session 被归档了 → 走 /cc-agent 让 CCAgentIndexRedirect
       // 做 Orca-aware 的「选下一条 / 空则跳 new」决策(见 runSessionAction 同位置注释)。
-      if (viewedSessionId && succeededIds.has(viewedSessionId)) {
+      const currentlyViewedSessionId = viewedSessionIdRef.current;
+      if (currentlyViewedSessionId && succeededIds.has(currentlyViewedSessionId)) {
         navigate('/cc-agent');
       }
 
@@ -3343,7 +3353,6 @@ function ExpandedView({
       runningSessionIds,
       confirmDialog,
       refreshSessions,
-      viewedSessionId,
       navigate,
       patchLocal,
       filter.status,

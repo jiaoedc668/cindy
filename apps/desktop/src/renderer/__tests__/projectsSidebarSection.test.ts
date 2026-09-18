@@ -129,7 +129,7 @@ describe('Projects sidebar section', () => {
     expect(projectsSectionSource).toContain(
       'return splitEntriesByDevice(mixedEntries, [...(remoteDeviceIndex?.keys() ?? [])], {',
     );
-    expect(projectsSectionSource).toContain('unclassified: deviceGroupingActive && !unclassifiedHidden ? unclassified : []');
+    expect(projectsSectionSource).toContain('unclassified: deviceGroupingActive && !unclassifiedHidden ? unclassified : undefined');
     // 每段独立折叠视图 + 段内作用域的「显示全部」(复核 P2:共用一个标志会让
     // 点任一段全段展开)。
     expect(projectsSectionSource).toMatch(
