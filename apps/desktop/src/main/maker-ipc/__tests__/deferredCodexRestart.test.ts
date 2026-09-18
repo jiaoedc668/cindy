@@ -30,7 +30,9 @@ describe('DeferredCodexRestartService', () => {
   }) {
     const restart = overrides?.restart ?? vi.fn(async () => {});
     const service = new DeferredCodexRestartService({
-      restart,
+      restart: async (applyRuntime) => {
+        if (await applyRuntime()) await restart();
+      },
       hasBusyLocalCodexSession: overrides?.hasBusyLocalCodexSession ?? (() => false),
       listLocalCodexSessionIds: overrides?.listLocalCodexSessionIds ?? (() => []),
       onApplied: overrides?.onApplied,
@@ -56,6 +58,29 @@ describe('DeferredCodexRestartService', () => {
     service.onSessionSettled();
     await vi.runOnlyPendingTimersAsync();
     expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves pending bridge work when a concurrent startup prevents guarded preparation', async () => {
+    const applyRuntime = vi.fn(async () => {});
+    let starting = true;
+    const service = new DeferredCodexRestartService({
+      restart: async (apply) => {
+        if (starting) throw new CodexCredentialModeSwitchBusyError(['starting-account']);
+        await apply();
+      },
+      hasBusyLocalCodexSession: () => false,
+      listLocalCodexSessionIds: () => [],
+      logger,
+    });
+    service.schedule('bridge-refresh', applyRuntime);
+    await service.flushBeforeLocalCodexSessionStart();
+    expect(applyRuntime).not.toHaveBeenCalled();
+    expect(service.isPending()).toBe(true);
+    starting = false;
+    await service.flushBeforeLocalCodexSessionStart();
+    expect(applyRuntime).toHaveBeenCalledOnce();
+    expect(service.isPending()).toBe(false);
+    service.clear();
   });
 
   it('无 pending 时 settle 不触发重启', async () => {

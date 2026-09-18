@@ -168,7 +168,8 @@ function createRestartHarness() {
   let coordinator: AgentInputCoordinator;
 
   const service = new DeferredCodexRestartService({
-    restart: async () => {
+    restart: async (applyRuntime) => {
+      if (!await applyRuntime()) return;
       await restartImpl();
     },
     hasBusyLocalCodexSession: () => busyOtherSession,

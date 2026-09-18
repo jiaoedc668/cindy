@@ -470,6 +470,8 @@ export function hostKey(remoteHostId?: string | null): string {
 }
 
 const LOCAL_CONTROL_PLANE_HOST_PREFIX = 'local-control:';
+// One bridge is shared by every local host, including account and utility hosts.
+const LOCAL_MCP_REFRESH_KEY = 'local-mcp-refresh';
 const CODEX_MODEL_LIST_RPC_TIMEOUT_MS = 20_000;
 const CODEX_MODEL_REFRESH_DEADLINE_MS = 20_000;
 
@@ -2175,7 +2177,8 @@ export class CodexAgent extends BaseAgent {
 
   private async waitForHostCredentialModeSwitch(key: string): Promise<void> {
     while (true) {
-      const switching = this.hostCredentialModeSwitches.get(key);
+      const switching = this.hostCredentialModeSwitches.get(LOCAL_MCP_REFRESH_KEY)
+        ?? this.hostCredentialModeSwitches.get(key);
       if (!switching) return;
       await switching.catch(() => undefined);
     }
@@ -2183,14 +2186,24 @@ export class CodexAgent extends BaseAgent {
 
   async beginLocalHostCredentialChange(
     reason = 'CodexAgent local credential state changed',
+    options: { allLocalHosts?: boolean } = {},
   ): Promise<{
     assertIdle(): void;
     retireActiveHost(): Promise<void>;
     finalize(): Promise<void>;
     release(): void;
   }> {
-    const key = hostKey();
-    await this.waitForHostCredentialModeSwitch(key);
+    const key = options.allLocalHosts ? LOCAL_MCP_REFRESH_KEY : hostKey();
+    // Check and reserve in the same synchronous segment. An await-only gate
+    // allows two callers to pass before either has installed its reservation.
+    while (true) {
+      const pending = options.allLocalHosts
+        ? [...this.hostCredentialModeSwitches.values()]
+        : [this.hostCredentialModeSwitches.get(LOCAL_MCP_REFRESH_KEY), this.hostCredentialModeSwitches.get(key)]
+          .filter((value): value is Promise<void> => value !== undefined);
+      if (pending.length === 0) break;
+      await Promise.allSettled(pending);
+    }
 
     let releaseSwitch!: () => void;
     const switchPromise = new Promise<void>((resolve) => {
@@ -2209,11 +2222,27 @@ export class CodexAgent extends BaseAgent {
       releaseSwitch();
     };
 
-    const activeUseCount = (): number => {
-      const host = this.hosts.get(key);
-      return host
-        ? this.hostActiveUseCount(key, host)
-        : (this.hostSessionBindingLeases.get(key) ?? 0);
+    const affectedKeys = (): string[] => options.allLocalHosts
+      ? [...new Set([
+          ...this.hosts.keys(), ...this.hostPromises.keys(),
+          ...this.hostSessionBindingLeases.keys(), ...this.retiringHosts.keys(),
+        ])].filter((candidate) => !candidate.startsWith('remote:'))
+      : [key];
+    const activeUseCount = (): number => affectedKeys().reduce((count, candidate) => {
+      const host = this.hosts.get(candidate);
+      return count + (host
+        ? this.hostActiveUseCount(candidate, host)
+        : (this.hostSessionBindingLeases.get(candidate) ?? 0))
+        + (options.allLocalHosts && this.hostPromises.has(candidate) ? 1 : 0);
+    }, 0);
+    const retire = async (): Promise<void> => {
+      for (const candidate of affectedKeys()) {
+        await this.retireHostKey(candidate, reason, {
+          failIfActive: options.allLocalHosts === true,
+          logPrefix: 'codex local credential hard cut',
+          throwOnShutdownFailure: true,
+        });
+      }
     };
 
     return {
@@ -2227,18 +2256,19 @@ export class CodexAgent extends BaseAgent {
       },
       retireActiveHost: async () => {
         if (released || hostRetired) return;
-        await this.retireHostKey(key, reason, {
-          failIfActive: false,
-          logPrefix: 'codex local credential hard cut',
-          throwOnShutdownFailure: true,
-        });
+        await retire();
         hostRetired = true;
       },
       finalize: async () => {
         if (released) return;
         try {
           if (!hostRetired) {
-            await this.disposeLocalHostForCredentialChangeUnlocked(key, reason);
+            if (options.allLocalHosts) {
+              if (activeUseCount() > 0) throw new Error('Cannot refresh MCP while local Codex hosts are active or starting');
+              await retire();
+            } else {
+              await this.disposeLocalHostForCredentialChangeUnlocked(key, reason);
+            }
           }
         } finally {
           cleanup();
@@ -2404,7 +2434,8 @@ export class CodexAgent extends BaseAgent {
           || (subagentRoutingProfileCompatible
             && await canReuseRegistered(existing, currentMode, currentEffective))
         ) {
-          if (this.hosts.get(key) !== existing || this.retiringHosts.has(key)) continue;
+          if (this.hosts.get(key) !== existing || this.retiringHosts.has(key)
+            || (!remoteHostId && this.hostCredentialModeSwitches.has(LOCAL_MCP_REFRESH_KEY))) continue;
           return existing;
         }
         await this.shutdownHostForCredentialModeChange(
@@ -2467,7 +2498,8 @@ export class CodexAgent extends BaseAgent {
             )
             && await canReuseRegistered(inflightHost, registeredRaw, registeredEffective)
           ) {
-            if (this.hosts.get(key) !== inflightHost || this.retiringHosts.has(key)) continue;
+            if (this.hosts.get(key) !== inflightHost || this.retiringHosts.has(key)
+              || this.hostCredentialModeSwitches.has(LOCAL_MCP_REFRESH_KEY)) continue;
             return inflightHost;
           }
           continue;
@@ -2504,6 +2536,7 @@ export class CodexAgent extends BaseAgent {
       }
 
       if (this.retiringHosts.has(key) || this.hosts.has(key) || this.hostPromises.has(key)) continue;
+      if (!remoteHostId && this.hostCredentialModeSwitches.has(LOCAL_MCP_REFRESH_KEY)) continue;
       const generation = this.bumpHostGeneration(key);
       // 超集归一化发生在 createHost 内(gateway-key → oauth-bearer);通过回调同步
       // in-flight 登记,让并发的 oauth-bearer 诉求命中复用而不是 supersede 重建。
@@ -2543,7 +2576,8 @@ export class CodexAgent extends BaseAgent {
       };
       this.hostPromises.set(key, inflightEntry);
       const host = await promise;
-      if (this.hosts.get(key) !== host || this.retiringHosts.has(key)) continue;
+      if (this.hosts.get(key) !== host || this.retiringHosts.has(key)
+        || (!remoteHostId && this.hostCredentialModeSwitches.has(LOCAL_MCP_REFRESH_KEY))) continue;
       return host;
     }
   }
@@ -2552,6 +2586,7 @@ export class CodexAgent extends BaseAgent {
     const key = hostKey();
     while (true) {
       await this.waitForHostCredentialModeSwitch(key);
+      if (this.hostCredentialModeSwitches.has(LOCAL_MCP_REFRESH_KEY)) continue;
       const retiring = this.retiringHosts.get(key);
       if (retiring) {
         await this.beginHostRetirement(key, retiring.host, 'recheck retirement before utility use');
@@ -4705,7 +4740,10 @@ export class CodexAgent extends BaseAgent {
       if (opts.remoteHostId) return await this.getHost(opts.remoteHostId, credentialMode);
       // 本地会话先等已有 credential switch 完成，再占用 startup reservation。否则
       // session 已拿到旧 host、但尚未 thread/start 订阅时，credential 切换看不到它。
-      await this.waitForHostCredentialModeSwitch(currentHostKey);
+      do {
+        await this.waitForHostCredentialModeSwitch(currentHostKey);
+      } while (this.hostCredentialModeSwitches.has(LOCAL_MCP_REFRESH_KEY)
+        || this.hostCredentialModeSwitches.has(currentHostKey));
       acquireHostBindingLeaseIfNeeded();
       return await this.getHost(opts.remoteHostId, credentialMode, {
         ...(accountProviderId ? { providerId: accountProviderId } : {}),

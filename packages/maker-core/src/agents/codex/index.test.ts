@@ -360,6 +360,116 @@ function createDeps(
 }
 
 describe('CodexAgent spawn configuration', () => {
+  it('holds account session recovery until the MCP bridge replacement is ready', async () => {
+    let endpoint = 'http://127.0.0.1:51359/mcp/cindy_scheduler';
+    const prepare = vi.fn(async () => {
+      const frozenEndpoint = endpoint;
+      return { extraArgs: [], extraEnv: {},
+        buildSessionMcpConfig: () => ({ 'mcp_servers.cindy_scheduler.url': frozenEndpoint }) };
+    });
+    const agent = new CodexAgent(createDeps({}, {
+      isolateCodexAccountSessions: true,
+      prepareCodexExtraSpawnConfig: prepare,
+    }));
+    const guard = await agent.beginLocalHostCredentialChange('MCP refresh', { allLocalHosts: true });
+    guard.assertIdle();
+    const recovery = agent.startSession({ sessionId: 'recover-account', sessionInstanceId: 'recover-instance', model: 'gpt-5.4',
+      workingDir: '/repo', resumeSessionId: '11111111-1111-1111-1111-111111111111' });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(prepare).not.toHaveBeenCalled();
+    await guard.retireActiveHost();
+    endpoint = 'http://127.0.0.1:51409/mcp/cindy_scheduler';
+    await guard.finalize();
+    const handle = await recovery;
+    const resume = createdTransports[0].lines.map(line => JSON.parse(line))
+      .find(message => message.method === Method.ThreadResume);
+    expect(resume.params.config['mcp_servers.cindy_scheduler.url']).toBe(endpoint);
+    await handle.close();
+    await agent.dispose();
+  });
+
+  it('defers MCP refresh while an account session is recovering before registration', async () => {
+    const started = deferred<void>();
+    const finish = deferred<void>();
+    MockCodexTransport.beforeThreadStartResponse = async () => {
+      started.resolve();
+      await finish.promise;
+    };
+    const agent = new CodexAgent(createDeps({}, { isolateCodexAccountSessions: true }));
+    const startup = agent.startSession({ sessionId: 'starting-account', model: 'gpt-5.4', workingDir: '/repo' });
+    await started.promise;
+    const guard = await agent.beginLocalHostCredentialChange('MCP refresh', { allLocalHosts: true });
+    expect(() => guard.assertIdle()).toThrow(/active Codex session/);
+    expect(createdTransports[0].closed).toBe(false);
+    guard.release();
+    finish.resolve();
+    const handle = await startup;
+    await handle.close();
+    await agent.dispose();
+  });
+
+  it('defers MCP refresh during asynchronous control-plane host preparation', async () => {
+    const started = deferred<void>();
+    const finish = deferred<void>();
+    const agent = new CodexAgent(createDeps({}, { prepareCodexExtraSpawnConfig: async () => {
+      started.resolve();
+      await finish.promise;
+      return { extraArgs: [], extraEnv: {} };
+    } }));
+    const models = agent.refreshLocalModels({ credentialMode: 'oauth-bearer' });
+    await started.promise;
+    const guard = await agent.beginLocalHostCredentialChange('MCP refresh', { allLocalHosts: true });
+    expect(() => guard.assertIdle()).toThrow(/active Codex session/);
+    guard.release();
+    finish.resolve();
+    await models;
+    await agent.dispose();
+  });
+
+  it('serializes overlapping MCP refresh reservations and releases after failure', async () => {
+    const prepare = vi.fn(async () => ({ extraArgs: [], extraEnv: {} }));
+    const agent = new CodexAgent(createDeps({}, { prepareCodexExtraSpawnConfig: prepare }));
+    const first = await agent.beginLocalHostCredentialChange('first refresh', { allLocalHosts: true });
+    let acquired = false;
+    const secondPromise = agent.beginLocalHostCredentialChange('second refresh', { allLocalHosts: true })
+      .then(guard => { acquired = true; return guard; });
+    await Promise.resolve();
+    expect(acquired).toBe(false);
+    // A bridge replacement failure must release its reservation without
+    // releasing a later refresh that has already acquired admission.
+    first.release();
+    const second = await secondPromise;
+    first.release();
+    const startup = agent.startSession({ sessionId: 'after-failed-refresh', model: 'gpt-5.4', workingDir: '/repo' });
+    await Promise.resolve();
+    expect(prepare).not.toHaveBeenCalled();
+    second.release();
+    const handle = await startup;
+    expect(prepare).toHaveBeenCalledOnce();
+    await handle.close();
+    await agent.dispose();
+  });
+
+  it('retires all local MCP consumers without blocking or retiring remote sessions', async () => {
+    const agent = new CodexAgent(createDeps({}, { getRemoteCodexTransport: () => {
+      const transport = new MockCodexTransport();
+      createdTransports.push(transport);
+      return transport;
+    } }));
+    await agent.refreshLocalModels({ credentialMode: 'oauth-bearer' });
+    const localTransport = createdTransports[0];
+    const guard = await agent.beginLocalHostCredentialChange('MCP refresh', { allLocalHosts: true });
+    const remote = await agent.startSession({ sessionId: 'remote-during-refresh', model: 'gpt-5.4',
+      workingDir: '/repo', remoteHostId: 'remote-1' });
+    guard.assertIdle();
+    await guard.retireActiveHost();
+    expect(localTransport.closed).toBe(true);
+    expect(createdTransports[1].closed).toBe(false);
+    await guard.finalize();
+    await remote.close();
+    await agent.dispose();
+  });
+
   it.each(['oauth-bearer', 'gateway-key'] as const)('separates canonical history from target credentials (%s)', async mode => {
     const credentialHome = path.resolve(os.tmpdir(), 'target-account-fixture');
     const historyHome = path.resolve(os.tmpdir(), 'original-history-fixture');

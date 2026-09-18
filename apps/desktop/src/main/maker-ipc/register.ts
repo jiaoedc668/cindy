@@ -1603,14 +1603,14 @@ async function applyMemoryChangeWithCodexRestart<T extends object>(
     {
       prepare: async () => {
         try {
-          await prepareCodexForAuthModeChange();
+          await prepareCodexForAuthModeChange({ allLocalHosts: true });
         } catch (err) {
           // busy 原样透传 —— 执行体靠它分流延迟路径;其余是真实故障,编码后上抛。
           if (isCredentialModeSwitchBusyError(err)) throw err;
           throwIpcError('INTERNAL', err instanceof Error ? err.message : String(err));
         }
       },
-      finalize: finalizeCodexAfterAuthModeChange,
+      finalize: () => finalizeCodexAfterAuthModeChange({ prepareMcpEnvironment: true }),
       cancel: cancelCodexAuthModeChange,
       scheduleDeferredRestart: (reason, applyRuntime) => {
         deferredCodexRestartHolder?.schedule(reason, applyRuntime);
@@ -5817,23 +5817,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 顺序：先 dispose app-server（含 busy 检查），成功后再关 bridge/cache。
     // 若先关 bridge、后 dispose 失败（busy），running 会话的 mcp_servers URL 会指向已停的 bridge。
     invalidateCodex: async () => {
-      let codexRestarted = false;
       try {
-        await restartCodexAfterAuthModeChange();
-        codexRestarted = true;
+        await restartCodexAfterAuthModeChange(shutdownCodexEnvironment);
       } catch (err) {
         log.warn('restartCodexAfterAuthModeChange on custom mcp change failed', {
           error: err instanceof Error ? err.message : String(err),
         });
-      }
-      if (codexRestarted) {
-        try {
-          await shutdownCodexEnvironment();
-        } catch (err) {
-          log.warn('shutdownCodexEnvironment on custom mcp change failed', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
       }
       // Pi 的 MCP bridge 同样按首个会话冻结 server 集合:自定义 MCP 增删改后必须 invalidate,
       // 否则新 Pi 会话仍暴露已删/已禁用的工具、拿不到新启用的工具(codex review P1)。
@@ -14232,7 +14221,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 期间本地 Codex live 会话的排队派发被上方 coordinator 的 hasPendingCredentialSwitch
   // 谓词挡住,兑现后由 onApplied 逐个唤醒。
   const deferredCodexRestartService = new DeferredCodexRestartService({
-    restart: restartCodexAfterAuthModeChange,
+    restart: (applyRuntime) => restartCodexAfterAuthModeChange(async () => {
+      if (await applyRuntime() === false) return false;
+      await shutdownCodexEnvironment();
+    }),
     hasBusyLocalCodexSession: () =>
       maker
         .listActiveSessions()

@@ -362,7 +362,8 @@ export function registerContactsIpc(): void {
     invalidateCodexMcp: async () => {
       try {
         const { restartCodexAfterAuthModeChange } = await import('../maker-host/index.js');
-        await restartCodexAfterAuthModeChange();
+        const { shutdownCodexEnvironment } = await import('../mcp-integrations/codexEnvironment.js');
+        await restartCodexAfterAuthModeChange(shutdownCodexEnvironment);
       } catch (err) {
         log.warn(
           'restartCodexAfterAuthModeChange on contacts toggle failed — codex keeps stale MCP config until app restart or re-toggle',
@@ -375,11 +376,7 @@ export function registerContactsIpc(): void {
       try {
         // Codex 与 Pi 各自的 MCP bridge 都在首个会话冻结 server 集合;contacts 开关变更后
         // 两者都要 invalidate,否则新会话仍暴露已禁用的 contacts server(Pi 侧 codex review P1)。
-        const [{ shutdownCodexEnvironment }, { invalidatePiEnvironment }] = await Promise.all([
-          import('../mcp-integrations/codexEnvironment.js'),
-          import('../mcp-integrations/piEnvironment.js'),
-        ]);
-        await shutdownCodexEnvironment();
+        const { invalidatePiEnvironment } = await import('../mcp-integrations/piEnvironment.js');
         invalidatePiEnvironment();
       } catch (err) {
         log.warn(

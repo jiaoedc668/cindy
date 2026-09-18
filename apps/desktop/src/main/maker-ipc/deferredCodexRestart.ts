@@ -14,9 +14,8 @@ import { isCredentialModeSwitchBusyError } from '../maker-host/codex-credential-
  * 兑现路径(与 PendingCredentialSwitchService 同款结构):
  *   turn done/error / 会话关闭(register.ts 接线)→ onSessionSettled:
  *     仍有本地 Codex 会话在 turn 内 → 静默保留 pending,等下一个边界;
- *     全部空闲 → 先执行登记的 applyRuntime(native setMemory 热推,此刻无
- *     in-flight turn 可打扰),再 restartCodexAfterAuthModeChange(关会话 +
- *     dispose host,下一次发送按新设置重建),最后 onApplied 唤醒被 pending 门
+ *     全部空闲 → restart 先持有全部本地 host 的启动守卫并软关闭会话，再在
+ *     守卫内执行 applyRuntime、替换 bridge，最后 onApplied 唤醒被 pending 门
  *     挡住的输入队列。
  *   排队门:pending 期间本地 Codex live 会话的输入队列被 coordinator 的
  *     hasPendingCredentialSwitch 谓词(register.ts 扩展)挡住 —— 否则排队消息
@@ -36,7 +35,8 @@ const DEFERRED_RESTART_RETRY_DELAY_MS = 10_000;
 
 export interface DeferredCodexRestartDeps {
   /** 实际执行软重启(maker-host restartCodexAfterAuthModeChange)。busy 时抛 CredentialModeSwitchBusyError。 */
-  restart: () => Promise<void>;
+  /** Run applyRuntime under the all-local startup guard; false cancels a stale owner generation. */
+  restart: (applyRuntime: () => Promise<boolean>) => Promise<void>;
   /**
    * 兑现前置探测:仍有本地 Codex 会话在 turn 内时跳过本轮,避免注定失败的
    * close 尝试刷 warn 日志。探测与真正兑现之间存在竞态窗口 —— restart 内部的
@@ -168,26 +168,28 @@ export class DeferredCodexRestartService {
       // deps 走 dynamic Maker facade,owner 边界期间会抛 —— 整段兜住,
       // 靠兜底定时器(或边界时的 clear())收口,不产生 unhandled rejection。
       if (this.deps.hasBusyLocalCodexSession()) return;
-      // claim-before-await 循环:await 期间新 schedule 覆盖登记时,下一轮取到
-      // 最新闭包接着应用(last-write-wins),旧闭包收口不会误清新登记(review
-      // P1 2026-07-23)。
-      for (;;) {
-        const applyRuntime = this.pendingApplyRuntime;
-        if (!applyRuntime) break;
-        this.pendingApplyRuntime = null;
-        try {
-          await applyRuntime();
-        } catch (err) {
-          // runtime 热推失败不阻塞重启:agent 级 memoryOverride 已在 setMemory
-          // 内先行落位,restart 后新 host ensure 时会补推,重启本身是最终收敛。
-          this.deps.logger?.warn('deferred memory runtime apply failed; proceeding with restart', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-        if (gen !== this.generation) return;
-      }
       const sessionIds = this.deps.listLocalCodexSessionIds();
-      await this.deps.restart();
+      await this.deps.restart(async () => {
+        if (gen !== this.generation) return false;
+        // Claim inside the startup guard: a runtime callback can close the
+        // shared bridge. Claim-before-await preserves last-write-wins updates.
+        for (;;) {
+          const applyRuntime = this.pendingApplyRuntime;
+          if (!applyRuntime) break;
+          this.pendingApplyRuntime = null;
+          try {
+            await applyRuntime();
+          } catch (err) {
+            // The in-memory override is set before native push; new hosts
+            // apply it after restart even if the old native push failed.
+            this.deps.logger?.warn('deferred memory runtime apply failed; proceeding with restart', {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+          if (gen !== this.generation) return false;
+        }
+        return true;
+      });
       if (gen !== this.generation) {
         // clear 与 restart 的 await 竞态:restart 副作用已发生(TOCTOU 无法避免,
         // owner 边界窗口内 facade 会抛、真正跨 owner 的 restart 到不了这里),
