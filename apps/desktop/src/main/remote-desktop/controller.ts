@@ -317,6 +317,15 @@ export class RemoteDesktopController {
     this.deps.stopInput();
     this.deps.changed();
   }
+  /** Fence delayed clipboard/host actions at an OS desktop boundary without
+   * withdrawing the existing manual-control grant. Native input owns rebinding. */
+  prepareInputDesktopChange(): boolean {
+    this.tick();
+    if (!this.active?.controlling || this.locking || this.displayChanging) return false;
+    this.controlGeneration++;
+    this.clipboardTransfer.reset();
+    return true;
+  }
   /** Explicit local disconnect must not be undone by the phone's recovery. */
   stopByUser(): void {
     const target = this.active ?? this.lastEnded;

@@ -86,6 +86,13 @@ describe('Windows lock screen service setup', () => {
       'DESKTOP_SYSTEM_SERVICE_UNAVAILABLE',
     );
   });
+  it('requires a successful Main probe before retaining manual control for an outdated service', async () => {
+    runtime.exec.mockResolvedValue({ stdout: 'updateRequired\n' });
+    expect(await readWindowsDesktopSupport()).toBe('updateRequired');
+    expect(runtime.open).toHaveBeenCalledOnce();
+    runtime.open.mockRejectedValue(new Error('caller rejected'));
+    expect(await readWindowsDesktopSupport()).toBe('missing');
+  });
 
   it('removes the service through the existing administrator action', async () => {
     await configureWindowsDesktopSupport(false);
@@ -128,10 +135,7 @@ describe('Windows lock screen service setup', () => {
     expect(await readWindowsDesktopSupport()).toBe('ready');
     expect(runtime.development).toHaveBeenCalledWith(false);
     expect(runtime.exec.mock.calls[0][0]).toBe(installed.binary);
-    expect(runtime.open).toHaveBeenCalledWith(
-      installed.binary,
-      JSON.stringify({ mode: 'probe' }),
-    );
+    expect(runtime.open).toHaveBeenCalledWith(installed.binary, JSON.stringify({ mode: 'probe' }));
   });
 
   it('uninstalls an authorized Dev service from the last installed helper without rebuilding', async () => {

@@ -93,7 +93,7 @@ export async function readWindowsDesktopSupport(): Promise<WindowsDesktopSupport
       windowsHide: true,
     });
     const status = stdout.trim();
-    if (status === 'ready') {
+    if (status === 'ready' || status === 'updateRequired') {
       try {
         const connection = await openWindowsDesktopConnection({ mode: 'probe' });
         connection.close();

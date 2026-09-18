@@ -12,6 +12,11 @@ never receive the password. The target is scoped to the service installation,
 Cindy account/region, local profile and Windows user. Switching accounts cannot
 reuse the previous account's setting.
 
+Saving a password is optional: without it, an authorized viewer must still be
+able to type into the Windows password screen manually. Desktop transitions
+rebind the existing manual input connection independently of this credential
+workflow, keeping the viewer's existing control grant and discarding old input.
+
 When an already-authorized remote desktop viewer takes control, the native host
 can submit one short-lived unlock request before starting ordinary input. The
 optional credential-provider DLL is registered with the service and signed by

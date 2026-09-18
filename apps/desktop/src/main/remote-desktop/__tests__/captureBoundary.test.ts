@@ -4,6 +4,10 @@ import { DESKTOP_LOCAL } from '../../../shared/remoteDesktop';
 const h = vi.hoisted(() => ({
   handlers: new Map<string, any>(),
   screenHandlers: new Map<string, any>(),
+  powerHandlers: new Map<string, () => void>(),
+  controlState: null as null | { peer: string; controlling: boolean },
+  rebindInput: vi.fn(),
+  startInput: vi.fn(async () => {}),
   geometryMatches: vi.fn(() => true),
   windows: [] as any[],
   deps: null as any,
@@ -39,7 +43,7 @@ vi.mock('../viewerDisplay', () => ({
 }));
 vi.mock('electron', () => ({
   app: { on: vi.fn() },
-  powerMonitor: { on: vi.fn() },
+  powerMonitor: { on: (name: string, handler: () => void) => h.powerHandlers.set(name, handler) },
   shell: {},
   nativeImage: {},
   screen: {
@@ -101,7 +105,9 @@ vi.mock('../controller', () => ({
     constructor(deps: any) {
       h.deps = deps;
     }
-    state = null;
+    get state() {
+      return h.controlState;
+    }
     displayId = '1';
     changingDisplay = false;
     displayGeometryMatches = h.geometryMatches;
@@ -137,6 +143,8 @@ vi.mock('../inputHost', () => ({
     }
     stop = vi.fn();
     input = h.hostInput;
+    start = h.startInput;
+    rebindForDesktopChange = h.rebindInput;
   },
   readDesktopDisplayModes: vi.fn(),
   setDesktopDisplayMode: vi.fn(),
@@ -185,6 +193,10 @@ beforeEach(() => {
   vi.useFakeTimers();
   h.handlers.clear();
   h.screenHandlers.clear();
+  h.powerHandlers.clear();
+  h.controlState = null;
+  h.rebindInput.mockClear();
+  h.startInput.mockClear();
   h.geometryMatches.mockReset().mockReturnValue(true);
   h.windows.length = 0;
   h.source = null;
@@ -207,6 +219,26 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+it('keeps the Windows viewer control grant through lock/unlock and does not invoke password setup', async () => {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  try {
+    await h.deps.startInput('1'); // No saved credential / credential identity.
+    expect(h.startInput).toHaveBeenCalledWith('1');
+    h.controlState = { peer: 'viewer', controlling: true };
+    for (const event of ['lock-screen', 'unlock-screen']) h.powerHandlers.get(event)!();
+    expect(h.rebindInput).toHaveBeenCalledTimes(2);
+    expect(h.releaseControl).not.toHaveBeenCalled();
+    expect(h.stop).not.toHaveBeenCalled();
+    expect(h.controlState.controlling).toBe(true);
+    h.controlState.controlling = false;
+    h.powerHandlers.get('lock-screen')!();
+    expect(h.rebindInput).toHaveBeenCalledTimes(2);
+  } finally {
+    Object.defineProperty(process, 'platform', original);
+  }
 });
 
 it.each(['resolution', 'restoreResolution'])(
@@ -250,19 +282,18 @@ it.each(['resolution', 'restoreResolution'])(
   },
 );
 
-it.each([
-  ['scaleFactor'],
-  ['bounds', 'scaleFactor'],
-  ['bounds', 'workArea', 'scaleFactor'],
-])('keeps managed geometry after late display metrics %j', (...metrics) => {
-  h.screenHandlers.get('display-metrics-changed')(
-    {},
-    { id: 1, size: { width: 1920, height: 1080 } },
-    metrics,
-  );
-  expect(h.geometryMatches).toHaveBeenCalledWith('1', 1920, 1080);
-  expect(h.stop).not.toHaveBeenCalled();
-});
+it.each([['scaleFactor'], ['bounds', 'scaleFactor'], ['bounds', 'workArea', 'scaleFactor']])(
+  'keeps managed geometry after late display metrics %j',
+  (...metrics) => {
+    h.screenHandlers.get('display-metrics-changed')(
+      {},
+      { id: 1, size: { width: 1920, height: 1080 } },
+      metrics,
+    );
+    expect(h.geometryMatches).toHaveBeenCalledWith('1', 1920, 1080);
+    expect(h.stop).not.toHaveBeenCalled();
+  },
+);
 
 it.each([
   [true, ['rotation']],

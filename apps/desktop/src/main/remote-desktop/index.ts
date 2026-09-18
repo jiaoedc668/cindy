@@ -137,7 +137,11 @@ let pending: {
 } | null = null;
 // A dead input helper or a refused injection is an input failure, not a session
 // failure: release control and keep the lease, capture and media running.
-const input = new DesktopInputHost(() => remoteDesktop.releaseControl());
+const input: DesktopInputHost = new DesktopInputHost(
+  () => remoteDesktop.releaseControl(),
+  undefined,
+  () => remoteDesktop.prepareInputDesktopChange(),
+);
 const windowsUnlock = new WindowsAutoUnlock({
   load: () => loadWindowsUnlockNative(),
   scope: () => {
@@ -367,7 +371,8 @@ export const remoteDesktop = new RemoteDesktopController({
     );
   },
   capabilities: async () => {
-    windowsAvailable = (await readWindowsDesktopSupport()) === 'ready';
+    const windowsSupport = await readWindowsDesktopSupport();
+    windowsAvailable = windowsSupport === 'ready' || windowsSupport === 'updateRequired';
     const settings = readDeviceLinkSettings();
     const enabled = settings.remoteDesktopEnabled && settings.remoteControlEnabled;
     const viewerDisplay = enabled && (await viewerDisplaySupported());
@@ -532,11 +537,14 @@ export function registerRemoteDesktopIpc(
   const sessionChanged = () => {
     nativeCapture.stop(); // do not retain pixels from the previous OS session state
     if (remoteDesktop.state?.controlling) {
-      try {
-        input.input([{ kind: 'release' }]);
-      } catch {
-        remoteDesktop.stop();
-      }
+      if (process.platform === 'win32') {
+        input.rebindForDesktopChange();
+      } else
+        try {
+          input.input([{ kind: 'release' }]);
+        } catch {
+          remoteDesktop.stop();
+        }
     }
     if (videoLease && nativeDisplay && host && !host.isDestroyed())
       host.send(DESKTOP_LOCAL.COMMAND, {

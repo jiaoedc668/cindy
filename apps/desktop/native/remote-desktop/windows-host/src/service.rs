@@ -510,9 +510,10 @@ fn serve(mut client: Pipe) -> Result<()> {
                             worker.write(b"[{\"kind\":\"release\"}]\n")?;
                             worker.line(1024)?;
                             send_sas(&owner)?;
-                            client.write(b"ok\n")?;
                             // Drop this input generation, including all pending batches.
-                            return Ok(());
+                            worker.retire()?;
+                            drop(worker);
+                            return client.write(b"desktop_changed\n");
                         }
                         if down {
                             held.insert(code.to_owned());
@@ -533,6 +534,13 @@ fn serve(mut client: Pipe) -> Result<()> {
         }
         if unsafe { WaitForSingleObject(owner.0, 0) } != WAIT_TIMEOUT {
             return denied();
+        }
+        if parsed["mode"] == "input" && response == b"desktop_changed\n" {
+            // The acknowledgement also certifies that the old worker/job is
+            // gone, so Main can safely establish a fresh input generation.
+            worker.retire()?;
+            drop(worker);
+            return client.write(b"desktop_changed\n");
         }
         client.write_response(&response, &parsed)?;
     }
@@ -555,12 +563,23 @@ impl std::ops::DerefMut for Worker {
 }
 impl Drop for Worker {
     fn drop(&mut self) {
+        let _ = self.retire();
+    }
+}
+impl Worker {
+    fn retire(&mut self) -> Result<()> {
         drop(self.pipe.take());
         unsafe {
             if WaitForSingleObject(self.child.0, 1200) != WAIT_OBJECT_0 {
-                TerminateJobObject(self.job.0, 1);
+                if TerminateJobObject(self.job.0, 1) == 0 {
+                    return Err(error());
+                }
+                if WaitForSingleObject(self.child.0, 5000) != WAIT_OBJECT_0 {
+                    return Err(io::Error::from(io::ErrorKind::TimedOut));
+                }
             }
         }
+        Ok(())
     }
 }
 struct InputChild(std::process::Child);
@@ -632,6 +651,9 @@ pub fn worker(name: &str) -> Result<()> {
         // a remote text batch still being applied by the worker.
         let mut acknowledgement = String::new();
         reader.read_line(&mut acknowledgement)?;
+        if acknowledgement == "desktop_changed\n" {
+            return pipe.write(b"desktop_changed\n");
+        }
         if acknowledgement != "ok\n" {
             return denied();
         }
