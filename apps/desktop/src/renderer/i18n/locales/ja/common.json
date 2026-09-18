@@ -8045,7 +8045,8 @@
         "effortEndFast": "高速",
         "effortEndSmart": "高精度",
         "railSameEngine": "{{agent}} のみ",
-        "crossEngineWarning": "エンジンを切り替えるとコンテキストが再構築され、内容が失われる場合があります"
+        "crossEngineWarning": "エンジンを切り替えるとコンテキストが再構築され、内容が失われる場合があります",
+        "favoritesSyncFailed": "お気に入りを同期できません。選択画面を開き直してください。接続先の更新が必要な場合があります。"
       }
     },
     "permissionSelector": {
@@ -9405,6 +9406,22 @@
   },
   "ccAgent": {
     "agentStatus": {
+      "readingMemory": "記憶を読んでいます…",
+      "savingMemory": "記憶を保存しています…",
+      "deletingMemory": "記憶を削除しています…",
+      "organizingMemory": "記憶を整理しています…",
+      "readingFile": "ファイルを読んでいます…",
+      "savingFile": "ファイルを更新しています…",
+      "readingWeb": "ウェブページを読んでいます…",
+      "searchingFiles": "ファイルを探しています…",
+      "testing": "テストを実行しています…",
+      "checking": "コードを確認しています…",
+      "reviewingMemory": "記憶を確認しています…",
+      "reviewingFiles": "ファイルを確認しています…",
+      "reviewingSources": "ウェブ情報を確認しています…",
+      "reviewingChecks": "チェック結果を確認しています…",
+      "replying": "返信中…",
+      "processing": "処理中…",
       "thinking": "考え中…",
       "generating": "生成中…",
       "editingFiles": "ファイルを編集中…",

@@ -8047,7 +8047,8 @@
         "effortEndFast": "Faster",
         "effortEndSmart": "Smarter",
         "railSameEngine": "{{agent}} only",
-        "crossEngineWarning": "Switching engines rebuilds context and may lose content"
+        "crossEngineWarning": "Switching engines rebuilds context and may lose content",
+        "favoritesSyncFailed": "Favorites could not sync. Reopen the picker to retry; the remote computer may need an update."
       }
     },
     "permissionSelector": {
@@ -9420,6 +9421,22 @@
   },
   "ccAgent": {
     "agentStatus": {
+      "readingMemory": "Reading memory…",
+      "savingMemory": "Saving memory…",
+      "deletingMemory": "Deleting memory…",
+      "organizingMemory": "Organizing memory…",
+      "readingFile": "Reading files…",
+      "savingFile": "Updating files…",
+      "readingWeb": "Reading web pages…",
+      "searchingFiles": "Searching files…",
+      "testing": "Running tests…",
+      "checking": "Checking code…",
+      "reviewingMemory": "Checking memory…",
+      "reviewingFiles": "Reviewing files…",
+      "reviewingSources": "Checking web sources…",
+      "reviewingChecks": "Reviewing check results…",
+      "replying": "Replying…",
+      "processing": "Working…",
       "thinking": "Thinking…",
       "generating": "Generating…",
       "editingFiles": "Editing files…",
