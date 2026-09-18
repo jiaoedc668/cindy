@@ -12,7 +12,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::*,
     Security::{Credentials::*, *},
-    System::{Com::CoTaskMemFree, Threading::GetCurrentProcess},
+    System::Threading::GetCurrentProcess,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -167,20 +167,33 @@ fn prompt(locale: &str) -> Result<Option<SavedCredential>> {
         pszMessageText: message.as_ptr(),
         ..unsafe { mem::zeroed() }
     };
-    let mut package = 0;
-    let mut raw = ptr::null_mut();
-    let mut size = 0;
+    // Read the actual Windows identity; environment variables are not authority.
+    // KEEP_USERNAME pre-fills and locks the account, leaving only its password.
+    use windows_sys::Win32::Security::Authentication::Identity::{
+        GetUserNameExW, NameSamCompatible,
+    };
+    let mut user = Zeroizing::new(vec![0u16; CREDUI_MAX_USERNAME_LENGTH as usize + 1]);
+    let mut user_size = user.len() as u32;
+    if unsafe { GetUserNameExW(NameSamCompatible, user.as_mut_ptr(), &mut user_size) } == 0 {
+        return Err(error());
+    }
+    let mut password = Zeroizing::new(vec![0u16; 1026]);
+    let target = wide("Cindy Windows automatic unlock");
     let status = unsafe {
-        CredUIPromptForWindowsCredentialsW(
+        CredUIPromptForCredentialsW(
             &info,
-            0,
-            &mut package,
+            target.as_ptr(),
             ptr::null(),
             0,
-            &mut raw,
-            &mut size,
+            user.as_mut_ptr(),
+            user.len() as u32,
+            password.as_mut_ptr(),
+            password.len() as u32,
             ptr::null_mut(),
-            CREDUIWIN_GENERIC | CREDUIWIN_ENUMERATE_CURRENT_USER,
+            CREDUI_FLAGS_GENERIC_CREDENTIALS
+                | CREDUI_FLAGS_KEEP_USERNAME
+                | CREDUI_FLAGS_ALWAYS_SHOW_UI
+                | CREDUI_FLAGS_DO_NOT_PERSIST,
         )
     };
     if status == ERROR_CANCELLED {
@@ -189,41 +202,20 @@ fn prompt(locale: &str) -> Result<Option<SavedCredential>> {
     if status != ERROR_SUCCESS {
         return Err(std::io::Error::from_raw_os_error(status as i32));
     }
-    let mut user = Zeroizing::new(vec![0u16; 514]);
-    let mut domain = Zeroizing::new(vec![0u16; 514]);
-    let mut password = Zeroizing::new(vec![0u16; 1026]);
-    let mut nu = user.len() as u32;
-    let mut nd = domain.len() as u32;
-    let mut np = password.len() as u32;
-    let ok = unsafe {
-        CredUnPackAuthenticationBufferW(
-            0,
-            raw,
-            size,
-            user.as_mut_ptr(),
-            &mut nu,
-            domain.as_mut_ptr(),
-            &mut nd,
-            password.as_mut_ptr(),
-            &mut np,
+    let text = |value: &[u16]| {
+        String::from_utf16_lossy(
+            &value[..value.iter().position(|c| *c == 0).unwrap_or(value.len())],
         )
     };
-    unsafe {
-        std::slice::from_raw_parts_mut(raw.cast::<u8>(), size as usize).zeroize();
-        CoTaskMemFree(raw);
-    }
-    if ok == 0 {
-        return Err(error());
-    }
+    let qualified = text(&user);
+    let (account_domain, account) = qualified.split_once('\\').ok_or_else(error)?;
+    let account_wide = wide(account);
+    let domain_wide = wide(account_domain);
     let mut logged = ptr::null_mut();
     if unsafe {
         LogonUserW(
-            user.as_ptr(),
-            if domain[0] == 0 {
-                ptr::null()
-            } else {
-                domain.as_ptr()
-            },
+            account_wide.as_ptr(),
+            domain_wide.as_ptr(),
             password.as_ptr(),
             LOGON32_LOGON_INTERACTIVE,
             LOGON32_PROVIDER_DEFAULT,
@@ -238,11 +230,6 @@ fn prompt(locale: &str) -> Result<Option<SavedCredential>> {
     if user_sid != own_sid()? {
         return denied();
     }
-    let text = |value: &[u16]| {
-        String::from_utf16_lossy(
-            &value[..value.iter().position(|c| *c == 0).unwrap_or(value.len())],
-        )
-    };
     let mut random = [0u8; 16];
     if unsafe {
         windows_sys::Win32::Security::Cryptography::BCryptGenRandom(
@@ -255,18 +242,9 @@ fn prompt(locale: &str) -> Result<Option<SavedCredential>> {
     {
         return denied();
     }
-    let mut account = text(&user);
-    let mut account_domain = text(&domain);
-    if let Some((prefix, name)) = account.split_once('\\') {
-        if !account_domain.is_empty() && !account_domain.eq_ignore_ascii_case(prefix) {
-            return denied();
-        }
-        account_domain = prefix.to_owned();
-        account = name.to_owned();
-    }
     let credential = SavedCredential {
-        user: account,
-        domain: account_domain,
+        user: account.to_owned(),
+        domain: account_domain.to_owned(),
         password: text(&password),
         sid: user_sid,
         revision: random.iter().map(|v| format!("{v:02x}")).collect(),

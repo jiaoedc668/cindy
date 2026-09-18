@@ -24,7 +24,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Securit
 
 [features]
 development = ["windows-sys/Win32_System_Diagnostics_Debug"]
-default = ["unlock", "windows-sys/Win32_System_JobObjects", "windows-sys/Win32_System_Registry", "windows-sys/Win32_System_SystemServices", "windows-sys/Win32_UI_Input_KeyboardAndMouse"]
+default = ["unlock", "windows-sys/Win32_System_JobObjects", "windows-sys/Win32_System_Registry", "windows-sys/Win32_System_SystemServices", "windows-sys/Win32_UI_Input_KeyboardAndMouse", "windows-sys/Win32_Graphics_Dwm"]
 unlock = ["windows-sys/Win32_Security_Credentials", "windows-sys/Win32_System_LibraryLoader", "windows-sys/Win32_System_SystemInformation"]
 
 [profile.release]
