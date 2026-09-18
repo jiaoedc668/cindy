@@ -8,8 +8,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import type { WindowsDesktopSetupPhase } from '../../shared/remoteDesktop';
+import { createLogger } from '../logger';
 
 const exec = promisify(execFile);
+const log = createLogger('windows-desktop-setup');
 export interface WindowsDesktopAssets {
   binary: string;
   addon: string;
@@ -35,7 +38,12 @@ async function latestInstalledAssets(userData: string): Promise<WindowsDesktopAs
     const input = path.join(directory, 'cindy-windows-desktop-input.exe');
     const receipt = path.join(directory, 'ready');
     try {
-      await Promise.all([fs.access(binary), fs.access(addon), fs.access(input), fs.access(receipt)]);
+      await Promise.all([
+        fs.access(binary),
+        fs.access(addon),
+        fs.access(input),
+        fs.access(receipt),
+      ]);
       const mtime = (await fs.stat(receipt)).mtimeMs;
       if (!latest || mtime > latest.mtime) latest = { binary, addon, mtime };
     } catch {
@@ -119,7 +127,10 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
       });
     });
 
-  async function resolve(prepare = false): Promise<WindowsDesktopAssets | null> {
+  async function resolve(
+    prepare = false,
+    progress?: (phase: WindowsDesktopSetupPhase) => void,
+  ): Promise<WindowsDesktopAssets | null> {
     const value = await describe();
     const result = assets(value.directory);
     const input = path.join(value.directory, 'cindy-windows-desktop-input.exe');
@@ -155,7 +166,9 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
         '--target-dir',
         buildDirectory,
       ];
+      let stage = 'compilingHost';
       try {
+        progress?.('compilingHost');
         await run(
           [
             ...args,
@@ -166,16 +179,38 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
           ],
           env,
         );
+        stage = 'compilingInput';
+        progress?.('compilingInput');
         await run(
           [...args, '--manifest-path', path.join(value.source, 'windows-input', 'Cargo.toml')],
           env,
         );
+        stage = 'publishing';
         await fs.copyFile(path.join(output, 'cindy-windows-desktop-host.exe'), result.binary);
         await fs.copyFile(path.join(output, 'cindy_windows_desktop_host.dll'), result.addon);
         await fs.copyFile(path.join(output, 'cindy-windows-desktop-input.exe'), input);
         await fs.writeFile(receipt, value.fingerprint);
         return result;
-      } catch {
+      } catch (error) {
+        // Do not log cargo's argv, paths, output or inherited environment. These
+        // fixed diagnostics distinguish missing tools, compile errors and I/O.
+        const details = error as { code?: unknown; killed?: unknown; stderr?: unknown };
+        const code =
+          typeof details?.code === 'number'
+            ? details.code
+            : typeof details?.code === 'string' && /^[A-Z_]{1,40}$/.test(details.code)
+              ? details.code
+              : 'UNKNOWN';
+        const compiler =
+          typeof details?.stderr === 'string'
+            ? details.stderr.match(/error\[(E[0-9]{4})\]/)?.[1]
+            : undefined;
+        log.warn('component preparation failed', {
+          stage,
+          code,
+          timeout: details?.killed === true,
+          compiler,
+        });
         await fs.rm(receipt, { force: true }).catch(() => {});
         throw new Error('DESKTOP_NATIVE_BUILD_FAILED');
       } finally {

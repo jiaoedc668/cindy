@@ -3,6 +3,13 @@
     "attentionCount": "Tasks needing attention: {{count}}"
   },
   "remoteDesktop": {
+    "windowsPreparing": "Preparing background components…",
+    "windowsCompilingHost": "Compiling the background service. First-time preparation may take a few minutes…",
+    "windowsCompilingInput": "Compiling input components before requesting administrator authorization…",
+    "windowsAuthorizing": "Waiting for Windows administrator authorization. Check the system prompt on this computer…",
+    "windowsVerifying": "Checking that the background service is ready…",
+    "windowsRemoving": "Removing the background service…",
+    "windowsRetry": "Retry Setup",
     "windowsDevelopmentMissing": "First-time setup prepares the background components, then requests administrator authorization.",
     "windowsDevelopmentHint": "Dev authorization trusts code in this development directory. Source file permissions stay unchanged.",
     "windowsupdateRequired": "Background components have changed. Authorize installation of the update.",
@@ -13,7 +20,7 @@
     "windowsready": "Lock screen and administrator prompt control is enabled. Authorization remains valid after restarting Cindy.",
     "windowsmissing": "First-time setup requires administrator authorization to install a background service and protect Cindy program files.",
     "windowsinstallRequired": "This feature requires an installed build of Cindy.",
-    "windowsunavailable": "The system service is unavailable. Reinstall Cindy and try again.",
+    "windowsunavailable": "The service status could not be checked. Retry setup.",
     "windowsEnable": "Authorize",
     "windowsDisable": "Remove service",
     "windowsError": "Authorization was not completed. Try again on this computer.",

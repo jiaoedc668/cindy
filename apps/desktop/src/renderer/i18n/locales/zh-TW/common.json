@@ -3,6 +3,13 @@
     "attentionCount": "需要關注的任務：{{count}}"
   },
   "remoteDesktop": {
+    "windowsPreparing": "正在準備背景元件，請稍候…",
+    "windowsCompilingHost": "正在編譯背景服務，首次準備可能需要幾分鐘…",
+    "windowsCompilingInput": "正在編譯輸入元件，即將請求管理員授權…",
+    "windowsAuthorizing": "正在等待 Windows 管理員授權，請在本機查看系統視窗…",
+    "windowsVerifying": "正在確認背景服務是否就緒…",
+    "windowsRemoving": "正在移除背景服務…",
+    "windowsRetry": "重試設定",
     "windowsDevelopmentMissing": "首次啟用會準備背景元件，再請求管理員授權。",
     "windowsDevelopmentHint": "Dev 授權會信任目前開發目錄中的程式碼，原始碼權限維持不變。",
     "windowsupdateRequired": "背景元件有更新，請重新授權安裝。",
@@ -13,7 +20,7 @@
     "windowsready": "已啟用，可操作鎖定畫面和管理員提示。重新啟動 Cindy 後仍然有效。",
     "windowsmissing": "首次啟用需管理員授權，以安裝背景服務並保護 Cindy 程式檔案。",
     "windowsinstallRequired": "此功能需要安裝版 Cindy。",
-    "windowsunavailable": "系統服務無法使用，請重新安裝 Cindy 後重試。",
+    "windowsunavailable": "暫時無法確認服務狀態，請重試設定。",
     "windowsEnable": "授權啟用",
     "windowsDisable": "移除服務",
     "windowsError": "尚未完成授權，請在這台電腦上重試。",

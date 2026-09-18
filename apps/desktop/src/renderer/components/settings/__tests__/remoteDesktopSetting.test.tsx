@@ -2,6 +2,8 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { RemoteDesktopSetting } from '../RemoteDesktopSetting';
+import { WindowsDesktopSetup } from '../../../../main/remote-desktop/windowsSetup';
+import type { WindowsDesktopSetupPhase } from '../../../../shared/remoteDesktop';
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../RemoteDesktopPermissions', () => ({ RemoteDesktopPermissions: () => null }));
 afterEach(() => {
@@ -79,7 +81,7 @@ it('keeps ordinary remote desktop enabled when administrator authorization is ca
   expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('true');
   expect(screen.getByRole('alert').textContent).toBe('remoteDesktop.windowsError');
   expect(
-    screen.getByRole('button', { name: 'remoteDesktop.windowsEnable' }).hasAttribute('disabled'),
+    screen.getByRole('button', { name: 'remoteDesktop.windowsRetry' }).hasAttribute('disabled'),
   ).toBe(false);
 });
 
@@ -156,4 +158,80 @@ it('explains a Dev build failure separately from cancelled administrator approva
   fireEvent.click(screen.getByRole('button', { name: 'remoteDesktop.windowsEnable' }));
   await act(async () => {});
   expect(screen.getByRole('alert').textContent).toBe('remoteDesktop.windowsPreparationError');
+});
+
+it('reopens the same background preparation, then allows retry after failure without duplicating setup', async () => {
+  vi.useFakeTimers();
+  let fail!: (error: Error) => void;
+  let progress!: (phase: WindowsDesktopSetupPhase) => void;
+  const configure = vi.fn((_enabled, update) => {
+    progress = update;
+    return new Promise<void>((_resolve, reject) => {
+      fail = reject;
+    });
+  });
+  const job = new WindowsDesktopSetup({ configure, stopDesktop: vi.fn() });
+  const windowsSupport = vi.fn((enabled: boolean) => job.run(enabled));
+  const state = vi.fn(async () => ({
+    enabled: true,
+    active: null,
+    windowsSupport: 'missing',
+    windowsDevelopment: true,
+    windowsSetup: job.read(),
+  }));
+  Object.assign(window, { electronAPI: { remoteDesktop: { state, windowsSupport } } });
+  const first = render(<RemoteDesktopSetting />);
+  await act(async () => {});
+  fireEvent.click(screen.getByRole('button', { name: 'remoteDesktop.windowsEnable' }));
+  await act(async () => {
+    await Promise.resolve();
+    progress('compilingHost');
+  });
+  first.unmount();
+  const reopened = render(<RemoteDesktopSetting />);
+  await act(async () => {});
+  expect(screen.getByText('remoteDesktop.windowsCompilingHost')).toBeTruthy();
+  const pending = screen.getByRole('button', { name: 'remoteDesktop.windowsSettingUp' });
+  expect(pending.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(pending);
+  expect(windowsSupport).toHaveBeenCalledOnce();
+  reopened.unmount();
+  await act(async () => {
+    fail(new Error('DESKTOP_NATIVE_BUILD_FAILED'));
+  });
+  render(<RemoteDesktopSetting />);
+  await act(async () => {});
+  expect(screen.getByRole('alert').textContent).toBe('remoteDesktop.windowsPreparationError');
+  const retry = screen.getByRole('button', { name: 'remoteDesktop.windowsRetry' });
+  expect(retry.hasAttribute('disabled')).toBe(false);
+  fireEvent.click(retry);
+  await act(async () => {
+    await Promise.resolve();
+    progress('authorizing');
+    await vi.advanceTimersByTimeAsync(2000);
+  });
+  expect(screen.getByText('remoteDesktop.windowsAuthorizing')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(configure).toHaveBeenCalledTimes(2);
+  await act(async () => {
+    fail(new Error('cancelled'));
+  });
+});
+
+it('does not permanently disable setup after a transient status probe failure', async () => {
+  const state = vi.fn(async () => ({
+    enabled: true,
+    active: null,
+    windowsSupport: 'unavailable',
+    windowsDevelopment: true,
+  }));
+  const windowsSupport = vi.fn(async () => {});
+  Object.assign(window, { electronAPI: { remoteDesktop: { state, windowsSupport } } });
+  render(<RemoteDesktopSetting />);
+  await act(async () => {});
+  const retry = screen.getByRole('button', { name: 'remoteDesktop.windowsRetry' });
+  expect(retry.hasAttribute('disabled')).toBe(false);
+  fireEvent.click(retry);
+  await act(async () => {});
+  expect(windowsSupport).toHaveBeenCalledExactlyOnceWith(true);
 });

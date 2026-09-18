@@ -48,11 +48,16 @@ function fixture(profile: string) {
 describe('Dev Windows desktop components', () => {
   it('does not compile or prompt while settings poll, and coalesces explicit preparation', async () => {
     const { run, runtime, service } = fixture('first-setup');
+    const progress = vi.fn();
     expect(await service.resolve()).toBeNull();
     expect(run).not.toHaveBeenCalled();
-    const [first, second] = await Promise.all([service.resolve(true), service.resolve(true)]);
+    const [first, second] = await Promise.all([
+      service.resolve(true, progress),
+      service.resolve(true),
+    ]);
     expect(first).toEqual(second);
     expect(run).toHaveBeenCalledTimes(2);
+    expect(progress.mock.calls).toEqual([['compilingHost'], ['compilingInput']]);
     expect(run.mock.calls[0][0]).toContain('development');
     const buildArgs = run.mock.calls[0][0];
     const buildDirectory = buildArgs[buildArgs.indexOf('--target-dir') + 1];

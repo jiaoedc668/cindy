@@ -44,6 +44,15 @@ export interface DesktopLocalState {
   permissionGuide?: boolean;
   windowsSupport?: WindowsDesktopSupport;
   windowsDevelopment?: boolean;
+  windowsSetup?: WindowsDesktopSetupState;
+}
+export type WindowsDesktopSetupPhase =
+  'preparing' | 'compilingHost' | 'compilingInput' | 'authorizing' | 'verifying' | 'removing';
+export interface WindowsDesktopSetupState {
+  revision: number;
+  phase: WindowsDesktopSetupPhase | null;
+  error: 'prepare' | 'setup' | null;
+  startedAt: number | null;
 }
 export type DesktopHostReply =
   | string

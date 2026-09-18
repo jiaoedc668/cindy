@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import type { WindowsDesktopSupport } from '../../shared/remoteDesktop';
+import type { WindowsDesktopSupport, WindowsDesktopSetupPhase } from '../../shared/remoteDesktop';
 import { createWindowsDevelopmentAssets, type WindowsDesktopAssets } from './windowsDevelopment';
 
 const exec = promisify(execFile);
@@ -18,7 +18,10 @@ function developmentAssets() {
     arch: process.arch,
   }));
 }
-async function assets(prepare = false): Promise<WindowsDesktopAssets | null> {
+async function assets(
+  prepare = false,
+  progress?: (phase: WindowsDesktopSetupPhase) => void,
+): Promise<WindowsDesktopAssets | null> {
   if (app.isPackaged)
     return {
       binary: path.join(
@@ -34,10 +37,15 @@ async function assets(prepare = false): Promise<WindowsDesktopAssets | null> {
         'cindy-windows-desktop-host.node',
       ),
     };
-  return developmentAssets().resolve(prepare);
+  return progress
+    ? developmentAssets().resolve(prepare, progress)
+    : developmentAssets().resolve(prepare);
 }
-async function helper(prepare = false): Promise<WindowsDesktopAssets | null> {
-  const current = await assets(prepare);
+async function helper(
+  prepare = false,
+  progress?: (phase: WindowsDesktopSetupPhase) => void,
+): Promise<WindowsDesktopAssets | null> {
+  const current = await assets(prepare, progress);
   if (current || app.isPackaged) return current;
   return developmentAssets().installed();
 }
@@ -74,13 +82,16 @@ export async function readWindowsDesktopSupport(): Promise<WindowsDesktopSupport
     return 'unavailable';
   }
 }
-export async function configureWindowsDesktopSupport(enabled: boolean): Promise<void> {
+export async function configureWindowsDesktopSupport(
+  enabled: boolean,
+  progress?: (phase: WindowsDesktopSetupPhase) => void,
+): Promise<void> {
   if (process.platform !== 'win32') throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
   let native: WindowsDesktopAssets | null;
   try {
     // Uninstall must use the last installed helper. Rebuilding current source
     // is not required to revoke an auto-start SYSTEM service.
-    native = await helper(enabled);
+    native = await helper(enabled, progress);
   } catch (error) {
     if (!enabled) {
       native = app.isPackaged ? null : await developmentAssets().installed();
@@ -94,11 +105,13 @@ export async function configureWindowsDesktopSupport(enabled: boolean): Promise<
   if (!native) throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
   // Recreating a Dev cache does not revoke the installed grant.
   if (enabled && !app.isPackaged && (await readWindowsDesktopSupport()) === 'ready') return;
+  progress?.('authorizing');
   await exec(
     native.binary,
     enabled ? ['--elevate-install', String(process.pid)] : ['--elevate-uninstall'],
     { timeout: 130_000, maxBuffer: 1024, windowsHide: true },
   );
+  progress?.('verifying');
   if (enabled && (await readWindowsDesktopSupport()) !== 'ready')
     throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
 }

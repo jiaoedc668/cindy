@@ -62,12 +62,14 @@ describe('Windows lock screen service setup', () => {
   });
 
   it('opens administrator setup only after an explicit enable action and verifies the real connection', async () => {
-    await configureWindowsDesktopSupport(true);
+    const progress = vi.fn();
+    await configureWindowsDesktopSupport(true, progress);
     expect(runtime.exec.mock.calls.map((call) => call[1])).toEqual([
       ['--elevate-install', String(process.pid)],
       ['--status'],
     ]);
     expect(runtime.open).toHaveBeenCalledOnce();
+    expect(progress.mock.calls).toEqual([['authorizing'], ['verifying']]);
   });
 
   it('does not enable or retry elevation after UAC is cancelled', async () => {

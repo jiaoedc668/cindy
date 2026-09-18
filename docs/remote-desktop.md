@@ -545,7 +545,13 @@ distinct from packaged installations. Version-2 development authorization record
 cannot be loaded by the version-1 packaged authorization path.
 
 The existing setting prepares Dev components only after the user clicks setup,
-then requests native UAC. Polling never compiles or elevates. Generated binaries
+then requests native UAC. Polling never compiles or elevates. Setup state belongs
+to Main, including the preparation/compilation/UAC/verification phase and last
+failure. Reopening settings observes the same state. Repeated enable requests
+join the in-flight operation without a second compiler or UAC prompt. Failed
+preparation and transient status-probe failures leave a retry action. Compiler
+diagnostics retain only phase, exit/OS code and an optional Rust error number;
+paths, compiler output, environment variables and input are not logged. Generated binaries
 are cached under userData by native source/runtime fingerprint, so a loaded Node
 addon is not overwritten. Normal source edits and Dev restarts reuse the grant;
 each settings poll and setup re-reads native source so a fingerprint change

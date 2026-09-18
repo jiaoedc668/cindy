@@ -1,10 +1,24 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { WindowsDesktopSupport } from '../../../shared/remoteDesktop';
+import type {
+  DesktopLocalState,
+  WindowsDesktopSetupPhase,
+  WindowsDesktopSetupState,
+  WindowsDesktopSupport,
+} from '../../../shared/remoteDesktop';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { RemoteDesktopPermissions } from './RemoteDesktopPermissions';
 import { extractIpcError } from '@/utils/ipcError';
+
+const phaseCopy: Record<WindowsDesktopSetupPhase, string> = {
+  preparing: 'remoteDesktop.windowsPreparing',
+  compilingHost: 'remoteDesktop.windowsCompilingHost',
+  compilingInput: 'remoteDesktop.windowsCompilingInput',
+  authorizing: 'remoteDesktop.windowsAuthorizing',
+  verifying: 'remoteDesktop.windowsVerifying',
+  removing: 'remoteDesktop.windowsRemoving',
+};
 
 export function RemoteDesktopSetting() {
   const { t } = useTranslation();
@@ -13,10 +27,26 @@ export function RemoteDesktopSetting() {
   const [windowsDevelopment, setWindowsDevelopment] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [setupPending, setSetupPending] = useState(false);
+  const [setup, setSetup] = useState<WindowsDesktopSetupState>();
   const [error, setError] = useState(false);
   const revision = useRef(0);
   const changing = useRef(false);
+  const mounted = useRef(false);
+  const setupRevision = useRef(-1);
+  const applyState = useCallback((state: DesktopLocalState) => {
+    if (!mounted.current) return;
+    setEnabled(state.enabled);
+    setWindowsSupport(state.windowsSupport);
+    setWindowsDevelopment(state.windowsDevelopment === true);
+    if (state.windowsSetup && state.windowsSetup.revision >= setupRevision.current) {
+      setupRevision.current = state.windowsSetup.revision;
+      setSetup(state.windowsSetup);
+      setServiceError(state.windowsSetup.error);
+    }
+  }, []);
   useEffect(() => {
+    mounted.current = true;
     const api = window.electronAPI?.remoteDesktop;
     if (!api) return;
     let active = true;
@@ -29,9 +59,7 @@ export function RemoteDesktopSetting() {
         .state(true)
         .then((state) => {
           if (active && current === revision.current) {
-            setEnabled(state.enabled);
-            setWindowsSupport(state.windowsSupport);
-            setWindowsDevelopment(state.windowsDevelopment === true);
+            applyState(state);
           }
         })
         .catch(() => {
@@ -44,11 +72,14 @@ export function RemoteDesktopSetting() {
     refresh();
     const timer = setInterval(refresh, 2000);
     return () => {
+      mounted.current = false;
       active = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [applyState]);
   if (!window.electronAPI?.remoteDesktop) return null;
+  const setupBusy = setupPending || !!setup?.phase;
+  const setupPhase = setup?.phase ?? (setupPending ? 'preparing' : null);
   return (
     <section
       aria-label={t('remoteDesktop.allow')}
@@ -68,7 +99,7 @@ export function RemoteDesktopSetting() {
         </div>
         <Switch
           aria-label={t('remoteDesktop.allow')}
-          disabled={busy}
+          disabled={busy || setupBusy}
           checked={enabled}
           onCheckedChange={(next) => {
             revision.current++;
@@ -94,9 +125,11 @@ export function RemoteDesktopSetting() {
             </p>
             <p className="text-12 text-[var(--text-tertiary)]">
               {t(
-                windowsDevelopment && windowsSupport === 'missing'
-                  ? 'remoteDesktop.windowsDevelopmentMissing'
-                  : `remoteDesktop.windows${windowsSupport}`,
+                setupPhase
+                  ? phaseCopy[setupPhase]
+                  : windowsDevelopment && windowsSupport === 'missing'
+                    ? 'remoteDesktop.windowsDevelopmentMissing'
+                    : `remoteDesktop.windows${windowsSupport}`,
               )}
             </p>
             {windowsDevelopment && (
@@ -104,7 +137,7 @@ export function RemoteDesktopSetting() {
                 {t('remoteDesktop.windowsDevelopmentHint')}
               </p>
             )}
-            {serviceError && (
+            {serviceError && !setupBusy && (
               <p role="alert" className="text-12 text-[var(--text-primary)]">
                 {t(
                   serviceError === 'prepare'
@@ -115,37 +148,44 @@ export function RemoteDesktopSetting() {
             )}
           </div>
           <Button
-            disabled={
-              busy || windowsSupport === 'installRequired' || windowsSupport === 'unavailable'
-            }
+            disabled={busy || setupBusy || windowsSupport === 'installRequired'}
             onClick={() => {
               revision.current++;
-              changing.current = true;
-              setBusy(true);
+              // Setup outlives this settings page. Keep polling its Main-owned
+              // phase so leaving/reopening never hides a compiler or UAC wait.
+              setSetupPending(true);
               setServiceError(null);
               void window.electronAPI.remoteDesktop
                 .windowsSupport(windowsSupport !== 'ready')
                 .then(() => window.electronAPI.remoteDesktop.state(true))
-                .then((state) => setWindowsSupport(state.windowsSupport))
-                .catch((error) =>
-                  setServiceError(
-                    extractIpcError(error)?.code === 'PRECONDITION_FAILED' ? 'prepare' : 'setup',
-                  ),
-                )
+                .then(applyState)
+                .catch((error) => {
+                  if (mounted.current)
+                    setServiceError(
+                      extractIpcError(error)?.code === 'PRECONDITION_FAILED' ? 'prepare' : 'setup',
+                    );
+                })
                 .finally(() => {
-                  changing.current = false;
-                  setBusy(false);
+                  if (mounted.current) {
+                    setSetupPending(false);
+                    void window.electronAPI.remoteDesktop
+                      .state(true)
+                      .then(applyState)
+                      .catch(() => {});
+                  }
                 });
             }}
           >
             {t(
-              busy
+              setupBusy
                 ? 'remoteDesktop.windowsSettingUp'
                 : windowsSupport === 'ready'
                   ? 'remoteDesktop.windowsDisable'
-                  : windowsSupport === 'updateRequired'
-                    ? 'remoteDesktop.windowsUpdate'
-                    : 'remoteDesktop.windowsEnable',
+                  : windowsSupport === 'unavailable' || serviceError
+                    ? 'remoteDesktop.windowsRetry'
+                    : windowsSupport === 'updateRequired'
+                      ? 'remoteDesktop.windowsUpdate'
+                      : 'remoteDesktop.windowsEnable',
             )}
           </Button>
         </div>

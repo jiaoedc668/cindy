@@ -35,24 +35,32 @@ describe('remote desktop state polling', () => {
     const assertTrustedAppRendererEvent = vi.fn();
     const app = { isPackaged: false };
     let handler: (event: unknown, check?: unknown) => Promise<Record<string, unknown>>;
-    compile(between(source, '  ipcMain.handle(DESKTOP_LOCAL.STATE', '  let windowsSetupBusy'), {
-      ipcMain: {
-        handle: (_name: string, callback: typeof handler) => {
-          handler = callback;
+    compile(
+      between(
+        source,
+        '  ipcMain.handle(DESKTOP_LOCAL.STATE',
+        '  ipcMain.handle(DESKTOP_LOCAL.WINDOWS_SUPPORT',
+      ),
+      {
+        ipcMain: {
+          handle: (_name: string, callback: typeof handler) => {
+            handler = callback;
+          },
+        },
+        DESKTOP_LOCAL: { STATE: 'state' },
+        app,
+        process: { platform: 'win32' },
+        assertTrustedAppRendererEvent,
+        readDeviceLinkSettings: () => ({ remoteDesktopEnabled: false }),
+        remoteDesktop: { state: null },
+        permissions: { guideOpen: false },
+        readWindowsDesktopSupport,
+        windowsSetup: { read: () => ({ phase: null, error: null, startedAt: null, revision: 0 }) },
+        throwIpcError: (code: string) => {
+          throw new Error(code);
         },
       },
-      DESKTOP_LOCAL: { STATE: 'state' },
-      app,
-      process: { platform: 'win32' },
-      assertTrustedAppRendererEvent,
-      readDeviceLinkSettings: () => ({ remoteDesktopEnabled: false }),
-      remoteDesktop: { state: null },
-      permissions: { guideOpen: false },
-      readWindowsDesktopSupport,
-      throwIpcError: (code: string) => {
-        throw new Error(code);
-      },
-    });
+    );
     for (let poll = 0; poll < 60; poll++) {
       expect(await handler!({}, poll % 2 ? false : undefined)).not.toHaveProperty('windowsSupport');
     }
