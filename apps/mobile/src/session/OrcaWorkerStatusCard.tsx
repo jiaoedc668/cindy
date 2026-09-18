@@ -7,6 +7,7 @@ import { useTheme, type ThemeColors } from '@/theme';
 import { i18n } from '@/i18n';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { hasDeviceLinkErrorCode } from '@/device-link/rehydrate';
+import { useDeviceLink } from '@/device-link/DeviceLinkContext';
 import { fontWeight, iconSize, iconStroke, lineHeight, radius, typeScale } from '@/theme/tokens';
 
 type Worker = { id?: string; label?: string; role?: string; status?: string; sessionId?: string };
@@ -128,11 +129,14 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
   useEffect(() => {
     setExpanded(false);
   }, [leadSessionId]);
-  // 被控端不支持该 channel 的判定:只随 transport / Lead 变化复位,失焦再聚焦不重探。
+  // 被控端不支持该 channel 的判定。transport 对象在同一设备断线重连、被控端升级
+  // 重启后保持同一身份,只绑 maker 会让升级后的被控端永远探不回来;因此一并绑到
+  // device-link 的连接代次 connectionEpoch —— 重连即重探一次。失焦再聚焦仍不重探。
+  const { connectionEpoch } = useDeviceLink();
   const [unsupported, setUnsupported] = useState(false);
   useEffect(() => {
     setUnsupported(false);
-  }, [leadSessionId, maker]);
+  }, [leadSessionId, maker, connectionEpoch]);
   const polling = focused && appActive && !unsupported;
   useEffect(() => {
     if (!polling) return;
@@ -149,9 +153,14 @@ export function OrcaWorkerStatusCard({ leadSessionId, maker, onOpenWorker }: {
         }
       } catch (error) {
         if (isUnsupportedChannelError(error)) {
-          // 永久性兼容结果,重试无意义:停轮询,面板保持不显示。
+          // 永久性兼容结果,重试无意义:停轮询。同时丢弃旧快照 —— 设备被旧版实例
+          // 接管/回滚时,留着它会无限期展示已无法验证的 Worker 状态,与「面板保持
+          // 不显示」的降级语义矛盾。
           stop = true;
-          if (active) setUnsupported(true);
+          if (active) {
+            setUnsupported(true);
+            setSnapshot(null);
+          }
         }
         // 其余为瞬时失败:保留上一份快照,下一轮再刷。
       } finally {
