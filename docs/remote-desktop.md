@@ -593,7 +593,19 @@ The existing application uninstall/upgrade hook removes the service; a subsequen
 application upgrade therefore still requires enabling lock screen control again.
 
 Desktop transitions terminate the old input helper, including pending batches
-and long text input; Main then recovers only the remote desktop lease. Ctrl+Alt+Del
+and long text input. The service reports a fixed `desktop_changed` completion
+after retiring that worker. Main rebinds only the native input connection while
+keeping the existing viewer/control grant, with bounded retries and cancellation
+on stop or revocation. Lock/unlock notifications also initiate this recovery.
+Input arriving during the transition is discarded, never replayed into the new
+password field. Genuine permission/helper failures still release control.
+
+Manual lock-screen keyboard input does not require a saved password or automatic
+unlock. An installed service offering an update remains usable after a successful
+Main authorization probe, rather than falling back to an unprivileged helper.
+This recovery neither submits saved credentials nor reopens a user-selected
+view-only session. No mobile wire message, peer reset or shared relay reconnection
+is added. Ctrl+Alt+Del
 is routed through service-side SendSAS impersonating the approved user's session.
 Windows policy decides whether software SAS is allowed; Cindy never changes it.
 Capture follows the input desktop and validates the selected monitor's geometry.

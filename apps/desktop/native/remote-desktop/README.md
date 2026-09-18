@@ -14,6 +14,12 @@ The desktop ACL, process token, UIPI and secure-desktop service boundary still
 apply. This does not elevate the helper or bypass UAC. An input failure releases
 control while keeping the viewer lease and video; viewers observe the resulting
 `controlling:false` on the existing heartbeat.
+An input-desktop transition is reported separately as `desktop_changed` after
+held inputs are released. The SYSTEM broker retires that worker before forwarding
+the signal. Main keeps the authorized viewer/control grant and creates a fresh
+input connection without replaying old batches or reading a saved password.
+Windows lock/unlock events proactively initiate the same bounded recovery;
+explicit stop, revocation and genuine input failures do not restore control.
 
 `desktop::tests::binding_and_rechecking_preserve_input_access` is an explicit
 native integration check for an unlocked, interactive Windows session. It uses
