@@ -117,6 +117,23 @@ describe('Windows lock screen service setup', () => {
     expect(runtime.exec.mock.calls.map((call) => call[1])).toEqual([['--status']]);
   });
 
+  it('probes an authorized Dev service with the last installed helper after the fingerprint changes', async () => {
+    runtime.app.isPackaged = false;
+    const installed = {
+      binary: path.join(customResources, 'installed-host.exe'),
+      addon: path.join(customResources, 'installed-host.node'),
+    };
+    runtime.installed.mockResolvedValue(installed);
+    runtime.exec.mockResolvedValue({ stdout: 'ready\n' });
+    expect(await readWindowsDesktopSupport()).toBe('ready');
+    expect(runtime.development).toHaveBeenCalledWith(false);
+    expect(runtime.exec.mock.calls[0][0]).toBe(installed.binary);
+    expect(runtime.open).toHaveBeenCalledWith(
+      installed.binary,
+      JSON.stringify({ mode: 'probe' }),
+    );
+  });
+
   it('uninstalls an authorized Dev service from the last installed helper without rebuilding', async () => {
     runtime.app.isPackaged = false;
     const installed = {

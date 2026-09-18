@@ -76,7 +76,8 @@ Restore pins the application path and captured
 tree without DELETE sharing and applies nested objects first. Protection covers
 every file under `resources/tools` and `resources/cindy-updater-runtime`,
 including Main-loaded extraResource addons. Ancestor pins open parents before
-the leaf. Packaged setup keeps the verified Main handle through hardening.
+the leaf. Packaged setup keeps the verified Main handle and the captured
+tree pins through hardening, applying ACLs through those handles.
 Packaged payload copies verify
 Authenticode and copy through an exclusive handle; packaged setup also
 Authenticode-checks Main against the helper before recording approval, taking

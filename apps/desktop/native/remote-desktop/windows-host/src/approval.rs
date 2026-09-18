@@ -205,14 +205,15 @@ pub fn install(pid: u32) -> Result<()> {
     // Refuse missing/broken packages, unsigned Main, and live writers before
     // changing permissions. Reinstall must not wipe the first-install restore
     // record: capture skips already-protected paths and would otherwise persist
-    // an empty snapshot. Keep the verified Main handle through hardening so the
-    // bytes cannot be replaced after Authenticode and before ACL/approval write.
-    let snapshot = if installation::development_identity().is_none() {
+    // an empty snapshot. Keep the verified Main handle and the captured tree
+    // pins through hardening so neither Main nor a directory can be replaced
+    // after Authenticode/capture and before ACL/approval write.
+    let mut snapshot = if installation::development_identity().is_none() {
         let paths = security::application_paths(&approval.application)?;
-        let _ancestors = security::pin_ancestors(&approval.application)?;
+        let ancestors = security::pin_ancestors(&approval.application)?;
         let (main, hash) =
             security::authenticate_application_code(&approval.application, &approval.executable)?;
-        let captured = security::AclSnapshot::capture(&paths)?;
+        let captured = security::CapturedTree::capture(&paths)?;
         if !security::process_still_running(client.0) {
             return denied();
         }
@@ -221,20 +222,14 @@ pub fn install(pid: u32) -> Result<()> {
             &approval.application.join(&approval.executable),
             &hash,
         )?;
-        Some((captured, main, hash))
+        // Tuple order is load-bearing: captured drops first on failure so
+        // rollback still holds the ancestor pins.
+        Some((ancestors, main, hash, captured))
     } else {
         None
     };
-    let mut restore = snapshot
-        .as_ref()
-        .map(|(captured, _, _)| captured)
-        .filter(|snapshot| !snapshot.paths.is_empty())
-        .cloned()
-        .map(security::AclRestoreGuard::new);
-    let _application = if let Some((captured, main, hash)) = &snapshot {
-        for (path, _) in &captured.paths {
-            security::secure_code(path)?;
-        }
+    let _application = if let Some((_, main, hash, captured)) = &mut snapshot {
+        captured.harden()?;
         if !security::process_still_running(client.0) {
             return denied();
         }
@@ -266,7 +261,7 @@ pub fn install(pid: u32) -> Result<()> {
         security::copy_protected_payload(&source.with_file_name(name), &destination)?;
         security::secure_code(&destination)?;
     }
-    if let Some((captured, main, hash)) = &snapshot {
+    if let Some((_, main, hash, captured)) = &snapshot {
         if !security::process_still_running(client.0) {
             return denied();
         }
@@ -276,8 +271,10 @@ pub fn install(pid: u32) -> Result<()> {
             hash,
         )?;
         let existing = read_restore_record(&target.directory)?;
-        if !(existing.is_some() && captured.paths.is_empty()) {
-            if let Some(combined) = security::AclSnapshot::combined(existing, captured.clone()) {
+        if !(existing.is_some() && captured.snapshot.paths.is_empty()) {
+            if let Some(combined) =
+                security::AclSnapshot::combined(existing, captured.snapshot.clone())
+            {
                 write_protected_record(
                     &target.directory,
                     installation::ACL_RESTORE,
@@ -293,8 +290,8 @@ pub fn install(pid: u32) -> Result<()> {
     )?;
     crate::unlock::register(&target)?;
     crate::service::install()?;
-    if let Some(restore) = restore.as_mut() {
-        restore.commit();
+    if let Some((_, _, _, captured)) = snapshot.as_mut() {
+        captured.commit();
     }
     Ok(())
 }
