@@ -16,7 +16,6 @@ use windows_sys::Win32::{
     Storage::FileSystem::*,
     System::{Pipes::*, Threading::*, IO::*},
 };
-use zeroize::Zeroize;
 pub struct Pipe {
     handle: Handle,
     buffered: Vec<u8>,
@@ -174,21 +173,6 @@ impl Pipe {
     pub fn write(&self, data: &[u8]) -> Result<()> {
         self.write_bounded(data, 240001)
     }
-    pub fn connected(&self) -> bool {
-        unsafe {
-            PeekNamedPipe(
-                self.handle.0,
-                ptr::null_mut(),
-                0,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
-        }
-    }
-    pub fn connection_guard(&self) -> Result<Handle> {
-        duplicate(self.handle.0)
-    }
     /// Both capture-worker and broker responses use the negotiated budget.
     /// Ordinary requests and unnegotiated responses retain the original limit.
     pub fn write_response(&self, data: &[u8], init: &serde_json::Value) -> Result<()> {
@@ -232,12 +216,7 @@ impl Pipe {
                 if end + 1 > limit {
                     return denied();
                 }
-                let line = self.buffered[..=end].to_vec();
-                self.buffered.copy_within(end + 1.., 0);
-                let remaining = self.buffered.len() - end - 1;
-                self.buffered[remaining..].zeroize();
-                self.buffered.truncate(remaining);
-                return Ok(line);
+                return Ok(self.buffered.drain(..=end).collect());
             }
             if self.buffered.len() >= limit {
                 return denied();
@@ -264,14 +243,7 @@ impl Pipe {
                 return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
             }
             self.buffered.extend_from_slice(&chunk[..count]);
-            chunk.zeroize();
         }
-    }
-}
-
-impl Drop for Pipe {
-    fn drop(&mut self) {
-        self.buffered.zeroize();
     }
 }
 

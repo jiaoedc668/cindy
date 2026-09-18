@@ -4,37 +4,11 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { RemoteDesktopSetting } from '../RemoteDesktopSetting';
 import { WindowsDesktopSetup } from '../../../../main/remote-desktop/windowsSetup';
 import type { WindowsDesktopSetupPhase } from '../../../../shared/remoteDesktop';
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'zh-CN' } }),
-}));
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../RemoteDesktopPermissions', () => ({ RemoteDesktopPermissions: () => null }));
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
-});
-
-it('configures and clears a native Windows password without a password field in the renderer', async () => {
-  let enabled = false;
-  const windowsAutoUnlock = vi.fn(async (next: boolean) => {
-    enabled = next;
-  });
-  const state = vi.fn(async () => ({
-    enabled: true,
-    active: null,
-    windowsSupport: 'ready',
-    windowsAutoUnlock: { enabled, available: true, busy: false, error: null },
-  }));
-  Object.assign(window, { electronAPI: { remoteDesktop: { state, windowsAutoUnlock } } });
-  render(<RemoteDesktopSetting />);
-  await act(async () => {});
-  expect(document.querySelector('input[type=password]')).toBeNull();
-  expect(windowsAutoUnlock).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole('button', { name: 'remoteDesktop.windowsAutoUnlockSetup' }));
-  await act(async () => {});
-  expect(windowsAutoUnlock).toHaveBeenLastCalledWith(true, 'zh-CN');
-  fireEvent.click(screen.getByRole('button', { name: 'remoteDesktop.windowsAutoUnlockClear' }));
-  await act(async () => {});
-  expect(windowsAutoUnlock).toHaveBeenLastCalledWith(false, 'zh-CN');
 });
 
 it('probes service status only while settings are mounted and after setup', async () => {

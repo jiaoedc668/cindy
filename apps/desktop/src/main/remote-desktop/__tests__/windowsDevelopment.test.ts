@@ -12,7 +12,7 @@ beforeAll(async () => {
   application = path.join(root, 'checkout', 'apps', 'desktop');
   executable = path.join(root, 'electron.exe');
   await fs.writeFile(executable, 'fake-runtime');
-  for (const crate of ['windows-host', 'windows-input', 'windows-unlock']) {
+  for (const crate of ['windows-host', 'windows-input']) {
     const directory = path.join(application, 'native', 'remote-desktop', crate);
     await fs.mkdir(path.join(directory, 'src'), { recursive: true });
     await Promise.all(
@@ -34,11 +34,9 @@ function fixture(profile: string) {
       'release',
     );
     await fs.mkdir(output, { recursive: true });
-    const names = args.some((arg) => arg.includes('windows-unlock'))
-      ? ['cindy_windows_unlock.dll']
-      : args.includes('development')
-        ? ['cindy-windows-desktop-host.exe', 'cindy_windows_desktop_host.dll']
-        : ['cindy-windows-desktop-input.exe'];
+    const names = args.includes('development')
+      ? ['cindy-windows-desktop-host.exe', 'cindy_windows_desktop_host.dll']
+      : ['cindy-windows-desktop-input.exe'];
     await Promise.all(
       names.map((name) => fs.writeFile(path.join(output, name), 'fake-native-output')),
     );
@@ -58,12 +56,8 @@ describe('Dev Windows desktop components', () => {
       service.resolve(true),
     ]);
     expect(first).toEqual(second);
-    expect(run).toHaveBeenCalledTimes(3);
-    expect(progress.mock.calls).toEqual([
-      ['compilingHost'],
-      ['compilingInput'],
-      ['compilingUnlock'],
-    ]);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(progress.mock.calls).toEqual([['compilingHost'], ['compilingInput']]);
     expect(run.mock.calls[0][0]).toContain('development');
     const buildArgs = run.mock.calls[0][0];
     const buildDirectory = buildArgs[buildArgs.indexOf('--target-dir') + 1];
@@ -76,7 +70,7 @@ describe('Dev Windows desktop components', () => {
     expect(path.relative(runtime.userData, first!.binary).startsWith('..')).toBe(false);
     expect(await fs.readFile(executable, 'utf8')).toBe('fake-runtime');
     expect(await service.resolve()).toEqual(first);
-    expect(run).toHaveBeenCalledTimes(3);
+    expect(run).toHaveBeenCalledTimes(2);
   });
 
   it('reuses prepared components after a Main restart without another build', async () => {
@@ -155,7 +149,7 @@ describe('Dev Windows desktop components', () => {
     const otherCheckout = path.join(root, 'other-checkout', 'apps', 'desktop');
     const otherElectron = path.join(root, 'other-electron.exe');
     await fs.writeFile(otherElectron, 'other-runtime');
-    for (const crate of ['windows-host', 'windows-input', 'windows-unlock']) {
+    for (const crate of ['windows-host', 'windows-input']) {
       const directory = path.join(otherCheckout, 'native', 'remote-desktop', crate);
       await fs.mkdir(path.join(directory, 'src'), { recursive: true });
       await Promise.all(

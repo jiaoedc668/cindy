@@ -53,35 +53,6 @@ export interface WindowsDesktopConnection {
   request(line: string): Promise<string>;
   close(): void;
 }
-export interface WindowsUnlockNative {
-  windowsUnlockEnabled(binary: string, scope: string): boolean;
-  configureWindowsUnlock(
-    binary: string,
-    scope: string,
-    enabled: boolean,
-    locale: string,
-  ): Promise<boolean>;
-  unlockWindows(binary: string, scope: string): Promise<boolean>;
-  cancelWindowsUnlock(): void;
-}
-export async function loadWindowsUnlockNative(): Promise<{
-  native: WindowsUnlockNative;
-  binary: string;
-} | null> {
-  if (process.platform !== 'win32') return null;
-  // Clearing a saved credential must not depend on rebuilding current Dev code.
-  const prepared = await helper();
-  if (!prepared) return null;
-  const native = requireNative(prepared.addon) as Partial<WindowsUnlockNative>;
-  if (
-    typeof native.configureWindowsUnlock !== 'function' ||
-    typeof native.windowsUnlockEnabled !== 'function' ||
-    typeof native.unlockWindows !== 'function' ||
-    typeof native.cancelWindowsUnlock !== 'function'
-  )
-    return null;
-  return { native: native as WindowsUnlockNative, binary: prepared.binary };
-}
 export async function readWindowsDesktopSupport(): Promise<WindowsDesktopSupport | undefined> {
   if (process.platform !== 'win32') return undefined;
   try {

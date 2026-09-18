@@ -8,8 +8,6 @@ mod installation;
 mod pipe;
 mod security;
 mod service;
-mod unlock;
-mod unlock_protocol;
 mod win;
 use win::*;
 

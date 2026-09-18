@@ -12,9 +12,8 @@ import {
   type WebContents,
   type DesktopCapturerSource,
 } from 'electron';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { release as osRelease } from 'node:os';
-import { SUPPORTED_LOCALES } from '../../shared/locale';
 import { loadDesktopIceServers } from './iceConfig';
 import { remoteCredentialHost } from './credentialHost';
 import {
@@ -52,9 +51,7 @@ import { systemAudioMuteGuard } from '../voice-input/SystemAudioMuteGuard.js';
 import {
   readWindowsDesktopSupport,
   configureWindowsDesktopSupport,
-  loadWindowsUnlockNative,
 } from './windowsHost';
-import { WindowsAutoUnlock } from './windowsAutoUnlock';
 import { WindowsDesktopSetup } from './windowsSetup';
 import {
   DesktopInputHost,
@@ -160,27 +157,6 @@ const input: DesktopInputHost = new DesktopInputHost(
   undefined,
   () => remoteDesktop.prepareInputDesktopChange(),
 );
-const windowsUnlock = new WindowsAutoUnlock({
-  load: () => loadWindowsUnlockNative(),
-  scope: () => {
-    if (process.platform !== 'win32') return null;
-    const identity = remoteCredentialHost.currentToken?.();
-    if (!identity) return null;
-    // Public account/device/profile identifiers namespace the local vault entry.
-    // This is not a password or credential secret.
-    // codeql[js/insufficient-password-hash]
-    return createHash('sha256')
-      .update(
-        JSON.stringify([
-          identity.realm,
-          identity.membership,
-          identity.authDevice,
-          app.getPath('userData'),
-        ]),
-      )
-      .digest('hex');
-  },
-});
 function stopVideo(): void {
   offerGeneration++;
   videoAttempt = undefined;
@@ -512,10 +488,7 @@ export const remoteDesktop = new RemoteDesktopController({
     await waitForDisplayRestore(displayId, expected, beforeChange);
   },
   createViewerDisplay,
-  startInput: async (displayId) => {
-    await windowsUnlock.unlock();
-    await input.start(displayId);
-  },
+  startInput: (displayId) => input.start(displayId),
   input: (events) => {
     try {
       input.input(events);
@@ -528,10 +501,7 @@ export const remoteDesktop = new RemoteDesktopController({
       throw error;
     }
   },
-  stopInput: () => {
-    windowsUnlock.cancel();
-    input.stop();
-  },
+  stopInput: () => input.stop(),
   releaseInput: () => input.release(),
   ...(process.platform === 'darwin'
     ? {
@@ -663,9 +633,6 @@ export function registerRemoteDesktopIpc(
               : await readWindowsDesktopSupport(),
             windowsDevelopment: process.platform === 'win32' && !app.isPackaged,
             windowsSetup: windowsSetup.read(),
-            ...(process.platform === 'win32'
-              ? { windowsAutoUnlock: await windowsUnlock.read() }
-              : {}),
           }
         : {}),
     };
@@ -677,8 +644,6 @@ export function registerRemoteDesktopIpc(
     if (event.sender !== getDeepLinkMainWindow()?.webContents)
       throwIpcError('PERMISSION_DENIED', 'Windows desktop setup unavailable');
     try {
-      if (!enabled && (await windowsUnlock.read()).enabled)
-        await windowsUnlock.configure(false, 'en');
       await windowsSetup.run(enabled);
     } catch (error) {
       if (error instanceof Error && error.message === 'DESKTOP_NATIVE_BUILD_FAILED')
@@ -687,26 +652,6 @@ export function registerRemoteDesktopIpc(
     }
     windowsAvailable = enabled;
   });
-  ipcMain.handle(
-    DESKTOP_LOCAL.WINDOWS_AUTO_UNLOCK,
-    async (event, enabled: unknown, locale: unknown) => {
-      assertTrustedAppRendererEvent(event);
-      if (
-        process.platform !== 'win32' ||
-        typeof enabled !== 'boolean' ||
-        typeof locale !== 'string' ||
-        !SUPPORTED_LOCALES.some((candidate) => candidate === locale)
-      )
-        throwIpcError('INVALID_PARAMS', 'Invalid Windows automatic unlock setting');
-      if (event.sender !== getDeepLinkMainWindow()?.webContents)
-        throwIpcError('PERMISSION_DENIED', 'Windows automatic unlock requires local settings');
-      try {
-        await windowsUnlock.configure(enabled, locale);
-      } catch {
-        throwIpcError('PRECONDITION_FAILED', 'Windows automatic unlock setup failed');
-      }
-    },
-  );
   ipcMain.handle(DESKTOP_LOCAL.ENABLE, async (event, enabled: unknown) => {
     assertTrustedAppRendererEvent(event);
     if (typeof enabled !== 'boolean') throwIpcError('INVALID_PARAMS', 'Invalid desktop setting');

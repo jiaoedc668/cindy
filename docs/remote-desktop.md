@@ -621,12 +621,6 @@ signed package installation, real administrator consent/cancellation (including
 another administrator account), ordinary Main-to-SYSTEM connection, app/service
 restart, lock/unlock, UAC, policy-enabled SAS, mixed-DPI displays, worker cleanup,
 upgrade/uninstall, and plugin rejection in the packaged runtime.
-Optional host-local password setup and Windows automatic unlock are described in
-[remote desktop credentials](remote-desktop-credentials.md#windows-host-local-automatic-unlock).
-This adds an independently signed credential-provider DLL to the service payload;
-only explicit local password setup enables automatic submission, and normal
-Windows credential providers remain available.
-
 Windows display-mode changes and pre-login/unattended post-reboot control are not
 implemented. Linux remains deferred. Do not present this as fully validated
 Windows support or advertise high-frame-rate secure capture.

@@ -5,7 +5,6 @@ import type {
   WindowsDesktopSetupPhase,
   WindowsDesktopSetupState,
   WindowsDesktopSupport,
-  WindowsAutoUnlockState,
 } from '../../../shared/remoteDesktop';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -16,18 +15,13 @@ const phaseCopy: Record<WindowsDesktopSetupPhase, string> = {
   preparing: 'remoteDesktop.windowsPreparing',
   compilingHost: 'remoteDesktop.windowsCompilingHost',
   compilingInput: 'remoteDesktop.windowsCompilingInput',
-  compilingUnlock: 'remoteDesktop.windowsCompilingUnlock',
   authorizing: 'remoteDesktop.windowsAuthorizing',
   verifying: 'remoteDesktop.windowsVerifying',
   removing: 'remoteDesktop.windowsRemoving',
 };
 
 export function RemoteDesktopSetting() {
-  const { t, i18n } = useTranslation();
-  const [autoUnlock, setAutoUnlock] = useState<WindowsAutoUnlockState>();
-  const [unlockPending, setUnlockPending] = useState(false);
-  const [unlockError, setUnlockError] = useState(false);
-  const unlockChanging = useRef(false);
+  const { t } = useTranslation();
   const [windowsSupport, setWindowsSupport] = useState<WindowsDesktopSupport>();
   const [serviceError, setServiceError] = useState<'prepare' | 'setup' | null>(null);
   const [windowsDevelopment, setWindowsDevelopment] = useState(false);
@@ -44,7 +38,6 @@ export function RemoteDesktopSetting() {
     if (!mounted.current) return;
     setEnabled(state.enabled);
     setWindowsSupport(state.windowsSupport);
-    if (state.windowsAutoUnlock) setAutoUnlock(state.windowsAutoUnlock);
     setWindowsDevelopment(state.windowsDevelopment === true);
     if (state.windowsSetup && state.windowsSetup.revision >= setupRevision.current) {
       setupRevision.current = state.windowsSetup.revision;
@@ -155,13 +148,7 @@ export function RemoteDesktopSetting() {
             )}
           </div>
           <Button
-            disabled={
-              busy ||
-              setupBusy ||
-              unlockPending ||
-              autoUnlock?.busy ||
-              windowsSupport === 'installRequired'
-            }
+            disabled={busy || setupBusy || windowsSupport === 'installRequired'}
             onClick={() => {
               revision.current++;
               // Setup outlives this settings page. Keep polling its Main-owned
@@ -199,63 +186,6 @@ export function RemoteDesktopSetting() {
                     : windowsSupport === 'updateRequired'
                       ? 'remoteDesktop.windowsUpdate'
                       : 'remoteDesktop.windowsEnable',
-            )}
-          </Button>
-        </div>
-      )}
-      {enabled && windowsSupport && autoUnlock && (
-        <div className="flex items-center justify-between gap-4 border-t border-[var(--border-default)] pt-3">
-          <div className="flex flex-col gap-1">
-            <p className="text-13 font-medium text-[var(--text-primary)]">
-              {t('remoteDesktop.windowsAutoUnlockTitle')}
-            </p>
-            <p className="text-12 text-[var(--text-tertiary)]">
-              {t('remoteDesktop.windowsAutoUnlockHint')}
-            </p>
-            <p className="text-12 text-[var(--text-tertiary)]">
-              {t('remoteDesktop.windowsAutoUnlockStorage')}
-            </p>
-            {(unlockError || autoUnlock.error) && (
-              <p role="alert" className="text-12 text-[var(--text-primary)]">
-                {t(
-                  autoUnlock.error === 'unlock'
-                    ? 'remoteDesktop.windowsAutoUnlockFailed'
-                    : 'remoteDesktop.windowsAutoUnlockSetupFailed',
-                )}
-              </p>
-            )}
-          </div>
-          <Button
-            loading={unlockPending || autoUnlock.busy}
-            disabled={
-              setupBusy ||
-              (!autoUnlock.enabled && (windowsSupport !== 'ready' || !autoUnlock.available))
-            }
-            onClick={() => {
-              if (unlockChanging.current) return;
-              unlockChanging.current = true;
-              setUnlockPending(true);
-              setUnlockError(false);
-              const locale = ['zh-CN', 'zh-TW', 'en', 'ja', 'ko'].includes(i18n.language)
-                ? i18n.language
-                : 'en';
-              void window.electronAPI.remoteDesktop
-                .windowsAutoUnlock(!autoUnlock.enabled, locale)
-                .then(() => window.electronAPI.remoteDesktop.state(true))
-                .then(applyState)
-                .catch(() => {
-                  if (mounted.current) setUnlockError(true);
-                })
-                .finally(() => {
-                  unlockChanging.current = false;
-                  if (mounted.current) setUnlockPending(false);
-                });
-            }}
-          >
-            {t(
-              autoUnlock.enabled
-                ? 'remoteDesktop.windowsAutoUnlockClear'
-                : 'remoteDesktop.windowsAutoUnlockSetup',
             )}
           </Button>
         </div>

@@ -264,7 +264,6 @@ unsafe extern "system" fn entry(_argc: u32, _argv: *mut *mut u16) {
         return;
     };
     *APPROVAL.lock().unwrap() = Some(approval);
-    crate::unlock::start_provider_channel(&STOP);
     status(SERVICE_RUNNING);
     while !STOP.load(Ordering::SeqCst) {
         // A closed Cindy releases its code handles, not the installed grant.
@@ -448,16 +447,10 @@ fn serve(mut client: Pipe) -> Result<()> {
     let caller_pid = client.client_pid()?;
     let init = client.line(1024)?;
     let parsed: serde_json::Value = serde_json::from_slice(&init)?;
-    if !matches!(
-        parsed["mode"].as_str(),
-        Some("probe" | "input" | "capture" | "unlock")
-    ) {
+    if !matches!(parsed["mode"].as_str(), Some("probe" | "input" | "capture")) {
         return denied();
     }
     let (owner, session) = authorize_connection(caller_pid)?;
-    if parsed["mode"] == "unlock" {
-        return crate::unlock::request(client, owner, session);
-    }
     if parsed["mode"] == "probe" {
         return client.write(b"ready\n");
     }

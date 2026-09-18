@@ -20,7 +20,6 @@ export const DESKTOP_LOCAL = {
   VIEW_HEARTBEAT: 'remote-desktop:view-heartbeat',
   NATIVE_FRAME: 'remote-desktop:native-frame',
   WINDOWS_SUPPORT: 'remote-desktop:windows-support',
-  WINDOWS_AUTO_UNLOCK: 'remote-desktop:windows-auto-unlock',
   PERMISSIONS: 'remote-desktop:permissions',
   OPEN_PERMISSION: 'remote-desktop:open-permission',
   DISMISS_GUIDE: 'remote-desktop:dismiss-permission-guide',
@@ -46,22 +45,9 @@ export interface DesktopLocalState {
   windowsSupport?: WindowsDesktopSupport;
   windowsDevelopment?: boolean;
   windowsSetup?: WindowsDesktopSetupState;
-  windowsAutoUnlock?: WindowsAutoUnlockState;
-}
-export interface WindowsAutoUnlockState {
-  enabled: boolean;
-  available: boolean;
-  busy: boolean;
-  error: 'setup' | 'unlock' | null;
 }
 export type WindowsDesktopSetupPhase =
-  | 'preparing'
-  | 'compilingHost'
-  | 'compilingInput'
-  | 'compilingUnlock'
-  | 'authorizing'
-  | 'verifying'
-  | 'removing';
+  'preparing' | 'compilingHost' | 'compilingInput' | 'authorizing' | 'verifying' | 'removing';
 export interface WindowsDesktopSetupState {
   revision: number;
   phase: WindowsDesktopSetupPhase | null;
@@ -85,7 +71,6 @@ export interface RemoteDesktopApi {
   state(checkWindowsSupport?: boolean): Promise<DesktopLocalState>;
   enable(enabled: boolean): Promise<void>;
   windowsSupport(enabled: boolean): Promise<void>;
-  windowsAutoUnlock(enabled: boolean, locale: string): Promise<void>;
   stop(): Promise<void>;
   permissions(): Promise<RemoteDesktopPermissions>;
   openPermission(permission: DesktopPermission): Promise<void>;

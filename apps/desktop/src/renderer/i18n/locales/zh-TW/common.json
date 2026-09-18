@@ -11,14 +11,6 @@
     "attentionCount": "需要關注的任務：{{count}}"
   },
   "remoteDesktop": {
-    "windowsCompilingUnlock": "正在準備自動解鎖元件…",
-    "windowsAutoUnlockTitle": "自動解鎖電腦",
-    "windowsAutoUnlockHint": "開啟後，已授權裝置連線時自動解鎖 Windows，無需在手機輸入密碼。",
-    "windowsAutoUnlockStorage": "密碼僅由 Windows 加密儲存在這台電腦，不上傳或同步。關閉時清除密碼。請先開啟鎖定畫面控制。",
-    "windowsAutoUnlockSetup": "設定密碼並開啟",
-    "windowsAutoUnlockClear": "關閉並清除密碼",
-    "windowsAutoUnlockSetupFailed": "無法儲存密碼。請在系統視窗輸入目前 Windows 帳戶的密碼（不是 PIN）後重試。",
-    "windowsAutoUnlockFailed": "自動解鎖失敗，已停止嘗試。請關閉後重新設定密碼；仍可手動解鎖。",
     "windowsPreparing": "正在準備背景元件，請稍候…",
     "windowsCompilingHost": "正在編譯背景服務，首次準備可能需要幾分鐘…",
     "windowsCompilingInput": "正在編譯輸入元件，即將請求管理員授權…",
