@@ -426,6 +426,42 @@ describe('DeferredCodexRestartService', () => {
     expect(service.isPending()).toBe(false);
   });
 
+  it('retains the pre-close snapshot if an immediate takeover also fails', async () => {
+    let liveIds = ['closed-by-immediate-prepare'];
+    const onApplied = vi.fn();
+    const { service } = createService({ listLocalCodexSessionIds: () => liveIds, onApplied });
+    service.schedule('memory-change');
+    expect(service.listGatedSessionIds()).toEqual(liveIds);
+    liveIds = [];
+    service.schedule('subagent-spawn-config-change');
+    await service.flushBeforeLocalCodexSessionStart();
+    expect(onApplied).toHaveBeenCalledExactlyOnceWith(['closed-by-immediate-prepare']);
+  });
+
+  it('retains closed IDs for immediate takeover but clears them across owner changes', async () => {
+    let liveIds = ['old-owner'];
+    let fail = true;
+    const onApplied = vi.fn();
+    const { service } = createService({
+      listLocalCodexSessionIds: () => liveIds,
+      onApplied,
+      restart: async () => {
+        liveIds = [];
+        if (fail) throw new CodexCredentialModeSwitchBusyError([]);
+      },
+    });
+    service.schedule('memory-change');
+    await service.flushBeforeLocalCodexSessionStart();
+    expect(service.listGatedSessionIds()).toEqual(['old-owner']);
+    service.clear();
+    expect(service.listGatedSessionIds()).toEqual([]);
+    liveIds = ['new-owner'];
+    fail = false;
+    service.schedule('memory-change');
+    await service.flushBeforeLocalCodexSessionStart();
+    expect(onApplied).toHaveBeenCalledExactlyOnceWith(['new-owner']);
+  });
+
   it('listGatedSessionIds: pending 时返回 live 会话名单, 无 pending / deps 抛错时为空', () => {
     const { service } = createService({
       listLocalCodexSessionIds: () => ['s1', 's2'],

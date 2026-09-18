@@ -60,6 +60,8 @@ export interface DeferredCodexRestartDeps {
 
 export class DeferredCodexRestartService {
   private pending = false;
+  /** Sessions closed by any attempt still need a wake when this pending restart settles. */
+  private readonly pendingSessionIds = new Set<string>();
   /** 兑现时机才执行的 runtime 变更(native setMemory 热推);最后一次登记生效。 */
   private pendingApplyRuntime: (() => Promise<void>) | null = null;
   /** 兑现串行化:turn done/error 双事件可能背靠背触发。 */
@@ -143,21 +145,25 @@ export class DeferredCodexRestartService {
     this.clearRetry();
     this.pending = false;
     this.pendingApplyRuntime = null;
+    this.pendingSessionIds.clear();
   }
 
   /**
-   * 当前被 pending 门挡住派发的本地 Codex live 会话名单。立即路径覆盖 pending
+   * 当前被 pending 门挡住及此前重试已关闭的本地 Codex 会话名单。立即路径覆盖 pending
    * 登记时,调用方在 prepare 关会话**前**采集,clear 后逐个补唤醒 —— 门谓词变
    * false 不会自己触发 drain,漏唤 = 队列停到下一次无关唤醒(review P1
-   * 2026-07-23)。无 pending 时为空;facade 边界窗口抛错按空处理。
+   * 2026-07-23)。无 pending 时为空;facade 暂不可读时保留已采集名单，owner clear 会清空。
    */
   listGatedSessionIds(): string[] {
     if (!this.pending) return [];
     try {
-      return this.deps.listLocalCodexSessionIds();
+      // Immediate takeover can itself fail after closing sessions. Its pre-close
+      // snapshot belongs to this pending work until success or owner clear too.
+      for (const id of this.deps.listLocalCodexSessionIds()) this.pendingSessionIds.add(id);
     } catch {
-      return [];
+      // Keep the previously captured IDs while the facade is unavailable.
     }
+    return [...this.pendingSessionIds];
   }
 
   private async tryApply(): Promise<void> {
@@ -168,7 +174,7 @@ export class DeferredCodexRestartService {
       // deps 走 dynamic Maker facade,owner 边界期间会抛 —— 整段兜住,
       // 靠兜底定时器(或边界时的 clear())收口,不产生 unhandled rejection。
       if (this.deps.hasBusyLocalCodexSession()) return;
-      const sessionIds = this.deps.listLocalCodexSessionIds();
+      for (const id of this.deps.listLocalCodexSessionIds()) this.pendingSessionIds.add(id);
       await this.deps.restart(async () => {
         if (gen !== this.generation) return false;
         // Claim inside the startup guard: a runtime callback can close the
@@ -202,6 +208,8 @@ export class DeferredCodexRestartService {
         // 下一边界把新 runtime 应用后再重启一次收口。
         return;
       }
+      const sessionIds = [...this.pendingSessionIds];
+      this.pendingSessionIds.clear();
       this.pending = false;
       this.clearRetry();
       this.deps.logger?.info('deferred codex restart applied', {
