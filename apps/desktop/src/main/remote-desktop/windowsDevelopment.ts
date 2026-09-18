@@ -22,7 +22,46 @@ function cacheRoot(userData: string): string {
   return path.join(userData, 'remote-desktop', 'windows-development');
 }
 
-async function latestInstalledAssets(userData: string): Promise<WindowsDesktopAssets | null> {
+function encodeReceipt(application: string, executable: string, fingerprint: string): string {
+  return JSON.stringify({ application, executable, fingerprint });
+}
+
+function receiptMatchesCheckout(
+  raw: string,
+  application: string,
+  executable: string,
+  fingerprint?: string,
+): boolean {
+  const text = raw.trim();
+  try {
+    const value = JSON.parse(text) as {
+      application?: unknown;
+      executable?: unknown;
+      fingerprint?: unknown;
+    };
+    if (
+      value &&
+      typeof value.application === 'string' &&
+      typeof value.executable === 'string' &&
+      typeof value.fingerprint === 'string'
+    ) {
+      return (
+        value.application === application &&
+        value.executable === executable &&
+        (fingerprint === undefined || value.fingerprint === fingerprint)
+      );
+    }
+  } catch {
+    /* Legacy receipts were the bare fingerprint hex. */
+  }
+  return fingerprint !== undefined && text === fingerprint;
+}
+
+async function latestInstalledAssets(
+  userData: string,
+  application: string,
+  executable: string,
+): Promise<WindowsDesktopAssets | null> {
   const root = cacheRoot(userData);
   let entries: string[];
   try {
@@ -44,6 +83,8 @@ async function latestInstalledAssets(userData: string): Promise<WindowsDesktopAs
         fs.access(input),
         fs.access(receipt),
       ]);
+      const raw = await fs.readFile(receipt, 'utf8');
+      if (!receiptMatchesCheckout(raw, application, executable)) continue;
       const mtime = (await fs.stat(receipt)).mtimeMs;
       if (!latest || mtime > latest.mtime) latest = { binary, addon, mtime };
     } catch {
@@ -137,7 +178,16 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
     const receipt = path.join(value.directory, 'ready');
     try {
       await Promise.all([fs.access(result.binary), fs.access(result.addon), fs.access(input)]);
-      if ((await fs.readFile(receipt, 'utf8')) === value.fingerprint) return result;
+      if (
+        receiptMatchesCheckout(
+          await fs.readFile(receipt, 'utf8'),
+          value.application,
+          value.executable,
+          value.fingerprint,
+        )
+      ) {
+        return result;
+      }
     } catch {
       /* Explicit setup prepares missing or partial assets. */
     }
@@ -189,7 +239,10 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
         await fs.copyFile(path.join(output, 'cindy-windows-desktop-host.exe'), result.binary);
         await fs.copyFile(path.join(output, 'cindy_windows_desktop_host.dll'), result.addon);
         await fs.copyFile(path.join(output, 'cindy-windows-desktop-input.exe'), input);
-        await fs.writeFile(receipt, value.fingerprint);
+        await fs.writeFile(
+          receipt,
+          encodeReceipt(value.application, value.executable, value.fingerprint),
+        );
         return result;
       } catch (error) {
         // Do not log cargo's argv, paths, output or inherited environment. These
@@ -226,5 +279,13 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
     });
     return building;
   }
-  return { resolve, installed: () => latestInstalledAssets(runtime.userData) };
+  return {
+    resolve,
+    installed: async () =>
+      latestInstalledAssets(
+        runtime.userData,
+        await fs.realpath(runtime.application),
+        await fs.realpath(runtime.executable),
+      ),
+  };
 }

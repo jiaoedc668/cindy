@@ -1111,9 +1111,11 @@ fn signer_thumbprint(path: &Path) -> Result<Vec<u8>> {
 }
 
 /// The service trusts this packaged Main after UAC. Authenticode matches the
-/// elevated helper. Electron already seals `app.asar`; there is no Windows
-/// catalog for unpacked JS/`.node`, and same-user injection into a live Main
-/// is outside this broker's sandbox claim.
+/// elevated helper. Electron already seals `app.asar`. Windows has no
+/// Authenticode catalog for unpacked JS/`.node`, so this path does not invent
+/// a Cindy-private signed manifest for those files. Same-user rewrites of
+/// unpacked files before UAC, or injection into a live Main, are outside this
+/// broker's sandbox claim; Main remains the privilege boundary.
 pub fn authenticate_application_code(
     install: &Path,
     executable: &str,

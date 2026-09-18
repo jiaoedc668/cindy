@@ -135,4 +135,39 @@ describe('Dev Windows desktop components', () => {
       await fs.writeFile(source, original);
     }
   });
+
+  it('does not uninstall another checkout helper that shares the same userData', async () => {
+    const shared = path.join(root, 'shared-profile');
+    const first = createWindowsDevelopmentAssets({
+      application,
+      executable,
+      userData: shared,
+      arch: 'x64',
+      run: fixture('unused').run,
+    });
+    const mine = await first.resolve(true);
+    const otherCheckout = path.join(root, 'other-checkout', 'apps', 'desktop');
+    const otherElectron = path.join(root, 'other-electron.exe');
+    await fs.writeFile(otherElectron, 'other-runtime');
+    for (const crate of ['windows-host', 'windows-input']) {
+      const directory = path.join(otherCheckout, 'native', 'remote-desktop', crate);
+      await fs.mkdir(path.join(directory, 'src'), { recursive: true });
+      await Promise.all(
+        ['Cargo.toml', 'Cargo.lock', 'build.rs', path.join('src', 'main.rs')].map((name) =>
+          fs.writeFile(path.join(directory, name), 'other-native-source'),
+        ),
+      );
+    }
+    const later = createWindowsDevelopmentAssets({
+      application: otherCheckout,
+      executable: otherElectron,
+      userData: shared,
+      arch: 'x64',
+      run: fixture('unused').run,
+    });
+    const other = await later.resolve(true);
+    expect(other!.binary).not.toBe(mine!.binary);
+    expect(await first.installed()).toEqual(mine);
+    expect(await later.installed()).toEqual(other);
+  });
 });

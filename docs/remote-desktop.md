@@ -512,8 +512,12 @@ hardening, re-hashes the same bytes before recording approval, and aborts if
 the requesting Main exits. Ancestor directories are pinned from the root down
 before the leaf is opened.
 Electron already seals `app.asar`; unpacked JS/`.node` has no Windows signed
-catalog, and these checks do not claim to sandbox same-user injection into a
-live Main. A later failure rolls those ACLs back, and uninstall restores
+catalog. Setup therefore does not invent a Cindy-private manifest for those
+files. Authenticode applies to PE that Windows can catalog (Main, host/input,
+and signed extraResource binaries). Same-user code that can rewrite unpacked
+files before UAC, or inject a live Main after it, already has equivalent
+local privilege; the broker's checks do not claim to sandbox that class of
+attacker. Main remains the privilege boundary. A later failure rolls those ACLs back, and uninstall restores
 the captured descriptors so a per-user uninstaller can delete the application again.
 Restore pins the application path and every captured object without DELETE
 sharing before changing ACLs, then applies nested objects first so a parent
@@ -556,8 +560,10 @@ are cached under userData by native source/runtime fingerprint, so a loaded Node
 addon is not overwritten. Normal source edits and Dev restarts reuse the grant;
 each settings poll and setup re-reads native source so a fingerprint change
 invalidates the cache without restarting Desktop. Uninstall and status still
-use the last prepared helper, so a compiler failure or deleted current cache
-does not block removing an auto-start SYSTEM service. Changed native service
+use the last prepared helper for this checkout and Electron executable, so a
+compiler failure or deleted current cache does not block removing that
+checkout's auto-start SYSTEM service. Shared userData cannot pick a newer
+helper from another checkout. Changed native service
 binaries show an update action requiring administrator approval. The broker checks the approved Windows user and exact bound Electron
 image. An `electron .` entry is resolved against the process's actual working
 directory; utility/renderer processes and other app directories do not inherit it.
