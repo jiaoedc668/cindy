@@ -59,7 +59,11 @@ pub fn application_paths(install: &Path) -> Result<Vec<PathBuf>> {
             paths.push(path);
         }
     }
-    for directory in ["resources/app.asar.unpacked", "resources/tools"] {
+    for directory in [
+        "resources/app.asar.unpacked",
+        "resources/tools",
+        "resources/cindy-updater-runtime",
+    ] {
         let root = install.join(directory);
         if !root.exists() {
             continue;
@@ -116,9 +120,15 @@ pub fn protected_service() -> Result<Vec<Handle>> {
     Ok(guards)
 }
 
+fn ancestor_pin_order(path: &Path) -> Vec<&Path> {
+    let mut ancestors: Vec<_> = path.ancestors().collect();
+    ancestors.reverse();
+    ancestors
+}
+
 pub fn pin_ancestors(path: &Path) -> Result<Vec<Handle>> {
     let mut guards = Vec::new();
-    for path in path.ancestors() {
+    for path in ancestor_pin_order(path) {
         guards.push(open_path(path, true)?);
     }
     Ok(guards)
@@ -1104,7 +1114,10 @@ fn signer_thumbprint(path: &Path) -> Result<Vec<u8>> {
 /// elevated helper. Electron already seals `app.asar`; there is no Windows
 /// catalog for unpacked JS/`.node`, and same-user injection into a live Main
 /// is outside this broker's sandbox claim.
-pub fn authenticate_application_code(install: &Path, executable: &str) -> Result<()> {
+pub fn authenticate_application_code(
+    install: &Path,
+    executable: &str,
+) -> Result<(Handle, [u8; 32])> {
     let _ = application_paths(install)?;
     let main = install.join(executable);
     let handle = open_payload(&main)?;
@@ -1116,7 +1129,22 @@ pub fn authenticate_application_code(install: &Path, executable: &str) -> Result
             return denied();
         }
     }
+    let hash = hash_handle(&handle)?;
+    Ok((handle, hash))
+}
+
+pub fn confirm_application_code(handle: &Handle, path: &Path, expected: &[u8; 32]) -> Result<()> {
+    verify_authenticode(path, handle.0)?;
+    if hash_handle(handle)? != *expected {
+        return denied();
+    }
     Ok(())
+}
+
+pub fn process_still_running(process: HANDLE) -> bool {
+    unsafe {
+        windows_sys::Win32::System::Threading::WaitForSingleObject(process, 0) == WAIT_TIMEOUT
+    }
 }
 
 fn verify_authenticode(path: &Path, handle: HANDLE) -> Result<()> {
@@ -1567,8 +1595,32 @@ mod tests {
         std::fs::write(app.join("Cindy.exe"), b"fixture").unwrap();
         assert!(authenticate_application_code(&app, "Cindy.exe").is_err());
         std::fs::write(app.join("resources/app.asar"), b"fixture").unwrap();
-        authenticate_application_code(&app, "Cindy.exe").unwrap();
+        let (handle, hash) = authenticate_application_code(&app, "Cindy.exe").unwrap();
+        confirm_application_code(&handle, &app.join("Cindy.exe"), &hash).unwrap();
         assert!(authenticate_application_code(&app, "missing.exe").is_err());
+        drop(handle);
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(app.join("Cindy.exe"))
+            .unwrap();
+        assert!(authenticate_application_code(&app, "Cindy.exe").is_err());
+        drop(writer);
+    }
+    #[test]
+    fn ancestor_pins_open_parents_before_the_leaf() {
+        let fixture = Fixture::new();
+        let nested = fixture.0.join("Cindy").join("resources");
+        std::fs::create_dir_all(&nested).unwrap();
+        let order: Vec<_> = ancestor_pin_order(&nested)
+            .into_iter()
+            .map(|path| path.to_path_buf())
+            .collect();
+        assert_eq!(order.last(), Some(&nested));
+        assert!(order[0].components().count() <= order.last().unwrap().components().count());
+        for window in order.windows(2) {
+            assert!(window[1].starts_with(&window[0]));
+        }
+        let _pins = pin_ancestors(&nested).unwrap();
     }
     #[test]
     fn application_restore_paths_cannot_escape_the_install_root() {
@@ -1589,6 +1641,7 @@ mod tests {
             "resources/app.asar.unpacked/native",
             "resources/tools/remote-desktop",
             "resources/tools/windows-taskbar",
+            "resources/cindy-updater-runtime",
             "userData",
             "workspace",
         ] {
@@ -1601,6 +1654,7 @@ mod tests {
             "resources/app.asar.unpacked/native/addon.node",
             "resources/tools/remote-desktop/cindy-windows-desktop-host.node",
             "resources/tools/windows-taskbar/cindy-windows-taskbar.node",
+            "resources/cindy-updater-runtime/vcruntime140.dll",
             "userData/preferences.json",
             "workspace/notes.txt",
         ] {
@@ -1615,6 +1669,7 @@ mod tests {
         assert!(
             paths.contains(&app.join("resources/tools/windows-taskbar/cindy-windows-taskbar.node"))
         );
+        assert!(paths.contains(&app.join("resources/cindy-updater-runtime/vcruntime140.dll")));
         assert!(paths.iter().all(|path| path.starts_with(&app)));
         assert!(!paths
             .iter()

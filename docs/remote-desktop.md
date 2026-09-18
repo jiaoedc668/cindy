@@ -499,14 +499,18 @@ the old on-demand service rather than leaving two brokers behind.
 
 Setup also protects the packaged application's code in place: its root and code
 directories, executable/DLL/V8 snapshot files, ASAR, unpacked native dependencies,
-and every file under `resources/tools` (including Main-loaded extraResource addons
-such as the Windows taskbar helper).
+and every file under `resources/tools` and `resources/cindy-updater-runtime`
+(including Main-loaded extraResource addons such as the Windows taskbar helper
+and the vendored updater VC++ runtime).
 It does not move the app or change parent-directory, userData, or workspace permissions.
 Protected code subsequently requires administrator rights to replace, including
 updates; the existing installer already handles protected-directory authorization.
 If a live writer or other sharing conflict still holds a code file, setup refuses
 before changing ACLs. Packaged setup also Authenticode-checks the approved Main
-executable against the elevated helper before hardening or recording approval.
+executable against the elevated helper, keeps that no-write handle through
+hardening, re-hashes the same bytes before recording approval, and aborts if
+the requesting Main exits. Ancestor directories are pinned from the root down
+before the leaf is opened.
 Electron already seals `app.asar`; unpacked JS/`.node` has no Windows signed
 catalog, and these checks do not claim to sandbox same-user injection into a
 live Main. A later failure rolls those ACLs back, and uninstall restores

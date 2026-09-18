@@ -184,30 +184,50 @@ fn write_protected_record(directory: &std::path::Path, name: &str, bytes: &[u8])
 pub fn install(pid: u32) -> Result<()> {
     security::require_elevated()?;
     security::prepare_elevated_identity_query();
-    let (approval, _client) = Approval::for_client(pid)?;
+    let (approval, client) = Approval::for_client(pid)?;
     let source = std::env::current_exe()?.canonicalize()?;
     let target = Installation::for_source(&source)?;
     // Refuse missing/broken packages, unsigned Main, and live writers before
     // changing permissions. Reinstall must not wipe the first-install restore
     // record: capture skips already-protected paths and would otherwise persist
-    // an empty snapshot.
+    // an empty snapshot. Keep the verified Main handle through hardening so the
+    // bytes cannot be replaced after Authenticode and before ACL/approval write.
     let snapshot = if installation::development_identity().is_none() {
         let paths = security::application_paths(&approval.application)?;
         let _ancestors = security::pin_ancestors(&approval.application)?;
-        security::authenticate_application_code(&approval.application, &approval.executable)?;
-        Some(security::AclSnapshot::capture(&paths)?)
+        let (main, hash) =
+            security::authenticate_application_code(&approval.application, &approval.executable)?;
+        let captured = security::AclSnapshot::capture(&paths)?;
+        if !security::process_still_running(client.0) {
+            return denied();
+        }
+        security::confirm_application_code(
+            &main,
+            &approval.application.join(&approval.executable),
+            &hash,
+        )?;
+        Some((captured, main, hash))
     } else {
         None
     };
     let mut restore = snapshot
         .as_ref()
+        .map(|(captured, _, _)| captured)
         .filter(|snapshot| !snapshot.paths.is_empty())
         .cloned()
         .map(security::AclRestoreGuard::new);
-    let _application = if let Some(snapshot) = &snapshot {
-        for (path, _) in &snapshot.paths {
+    let _application = if let Some((captured, main, hash)) = &snapshot {
+        for (path, _) in &captured.paths {
             security::secure_code(path)?;
         }
+        if !security::process_still_running(client.0) {
+            return denied();
+        }
+        security::confirm_application_code(
+            main,
+            &approval.application.join(&approval.executable),
+            hash,
+        )?;
         security::protect_application(&approval.application)?
     } else {
         Vec::new()
@@ -227,10 +247,18 @@ pub fn install(pid: u32) -> Result<()> {
         security::copy_protected_payload(&source.with_file_name(name), &destination)?;
         security::secure_code(&destination)?;
     }
-    if let Some(captured) = snapshot {
+    if let Some((captured, main, hash)) = &snapshot {
+        if !security::process_still_running(client.0) {
+            return denied();
+        }
+        security::confirm_application_code(
+            main,
+            &approval.application.join(&approval.executable),
+            hash,
+        )?;
         let existing = read_restore_record(&target.directory)?;
         if !(existing.is_some() && captured.paths.is_empty()) {
-            if let Some(combined) = security::AclSnapshot::combined(existing, captured) {
+            if let Some(combined) = security::AclSnapshot::combined(existing, captured.clone()) {
                 write_protected_record(
                     &target.directory,
                     installation::ACL_RESTORE,
