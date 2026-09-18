@@ -158,7 +158,16 @@ fn open_path(path: &Path, allow_write: bool) -> Result<Handle> {
     Ok(handle)
 }
 
-pub fn check_paths(paths: Vec<PathBuf>) -> Result<Vec<Handle>> {
+struct LocalSid(PSID);
+impl Drop for LocalSid {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.0);
+        }
+    }
+}
+
+fn trusted_installer() -> Result<LocalSid> {
     let mut trusted_installer = ptr::null_mut();
     // Exact Windows servicing identity, not all service SIDs.
     if unsafe {
@@ -170,106 +179,106 @@ pub fn check_paths(paths: Vec<PathBuf>) -> Result<Vec<Handle>> {
     {
         return Err(error());
     }
-    struct LocalSid(PSID);
-    impl Drop for LocalSid {
-        fn drop(&mut self) {
-            unsafe {
-                LocalFree(self.0);
+    Ok(LocalSid(trusted_installer))
+}
+
+fn handle_is_protected(handle: HANDLE, trusted_installer: PSID) -> bool {
+    let mut owner = ptr::null_mut();
+    let mut acl = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    let code = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            &mut acl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return false;
+    }
+    if acl.is_null() || owner.is_null() || unsafe { IsValidAcl(acl) } == 0 {
+        unsafe {
+            LocalFree(descriptor);
+        }
+        return false;
+    }
+    let trusted = |sid| unsafe {
+        IsWellKnownSid(sid, WinLocalSystemSid) != 0
+            || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+            || EqualSid(sid, trusted_installer) != 0
+    };
+    let mut safe = trusted(owner);
+    if safe {
+        unsafe {
+            if let Some(parsed) = acl.cast::<ACL>().as_ref() {
+                for i in 0..parsed.AceCount as u32 {
+                    let mut ace = ptr::null_mut();
+                    if GetAce(acl, i, &mut ace) == 0 || ace.is_null() {
+                        safe = false;
+                        break;
+                    }
+                    let Some(header) = ace.cast::<ACE_HEADER>().as_ref() else {
+                        safe = false;
+                        break;
+                    };
+                    if header.AceFlags as u32 & INHERIT_ONLY_ACE != 0 {
+                        continue;
+                    }
+                    if header.AceType as u32 == ACCESS_DENIED_ACE_TYPE {
+                        continue;
+                    }
+                    if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE {
+                        safe = false;
+                        break;
+                    }
+                    if (header.AceSize as usize) < mem::size_of::<ACCESS_ALLOWED_ACE>() {
+                        safe = false;
+                        break;
+                    }
+                    let Some(allow) = ace.cast::<ACCESS_ALLOWED_ACE>().as_ref() else {
+                        safe = false;
+                        break;
+                    };
+                    let mutations = GENERIC_ALL
+                        | GENERIC_WRITE
+                        | WRITE_DAC
+                        | WRITE_OWNER
+                        | DELETE
+                        | FILE_WRITE_DATA
+                        | FILE_APPEND_DATA
+                        | FILE_WRITE_EA
+                        | FILE_WRITE_ATTRIBUTES
+                        | FILE_DELETE_CHILD;
+                    if allow.Mask & mutations != 0
+                        && !trusted((&allow.SidStart as *const u32).cast_mut().cast())
+                    {
+                        safe = false;
+                        break;
+                    }
+                }
+            } else {
+                safe = false;
             }
         }
     }
-    let trusted_installer = LocalSid(trusted_installer);
+    unsafe {
+        LocalFree(descriptor);
+    }
+    safe
+}
+
+pub fn check_paths(paths: Vec<PathBuf>) -> Result<Vec<Handle>> {
+    let trusted_installer = trusted_installer()?;
     let mut handles = Vec::new();
     for path in paths {
         // ACL changes do not revoke existing write handles. Refuse those too.
         let handle = open_path(&path, false)?;
-        let mut owner = ptr::null_mut();
-        let mut acl = ptr::null_mut();
-        let mut descriptor = ptr::null_mut();
-        let code = unsafe {
-            GetSecurityInfo(
-                handle.0,
-                SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-                &mut owner,
-                ptr::null_mut(),
-                &mut acl,
-                ptr::null_mut(),
-                &mut descriptor,
-            )
-        };
-        if code != ERROR_SUCCESS {
-            return denied();
-        }
-        if acl.is_null() || owner.is_null() || unsafe { IsValidAcl(acl) } == 0 {
-            unsafe {
-                LocalFree(descriptor);
-            }
-            return denied();
-        }
-        let trusted = |sid| unsafe {
-            IsWellKnownSid(sid, WinLocalSystemSid) != 0
-                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
-                || EqualSid(sid, trusted_installer.0) != 0
-        };
-        let mut safe = trusted(owner);
-        if safe {
-            unsafe {
-                if let Some(parsed) = acl.cast::<ACL>().as_ref() {
-                    for i in 0..parsed.AceCount as u32 {
-                        let mut ace = ptr::null_mut();
-                        if GetAce(acl, i, &mut ace) == 0 || ace.is_null() {
-                            safe = false;
-                            break;
-                        }
-                        let Some(header) = ace.cast::<ACE_HEADER>().as_ref() else {
-                            safe = false;
-                            break;
-                        };
-                        if header.AceFlags as u32 & INHERIT_ONLY_ACE != 0 {
-                            continue;
-                        }
-                        if header.AceType as u32 == ACCESS_DENIED_ACE_TYPE {
-                            continue;
-                        }
-                        if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE {
-                            safe = false;
-                            break;
-                        }
-                        if (header.AceSize as usize) < mem::size_of::<ACCESS_ALLOWED_ACE>() {
-                            safe = false;
-                            break;
-                        }
-                        let Some(allow) = ace.cast::<ACCESS_ALLOWED_ACE>().as_ref() else {
-                            safe = false;
-                            break;
-                        };
-                        let mutations = GENERIC_ALL
-                            | GENERIC_WRITE
-                            | WRITE_DAC
-                            | WRITE_OWNER
-                            | DELETE
-                            | FILE_WRITE_DATA
-                            | FILE_APPEND_DATA
-                            | FILE_WRITE_EA
-                            | FILE_WRITE_ATTRIBUTES
-                            | FILE_DELETE_CHILD;
-                        if allow.Mask & mutations != 0
-                            && !trusted((&allow.SidStart as *const u32).cast_mut().cast())
-                        {
-                            safe = false;
-                            break;
-                        }
-                    }
-                } else {
-                    safe = false;
-                }
-            }
-        }
-        unsafe {
-            LocalFree(descriptor);
-        }
-        if !safe {
+        if !handle_is_protected(handle.0, trusted_installer.0) {
             return denied();
         }
         handles.push(handle);
@@ -598,14 +607,12 @@ pub fn secure_code(path: &Path) -> Result<()> {
     secure_code_with_descriptor(path, CODE_DACL)
 }
 
-fn open_for_acl(path: &Path) -> Result<Handle> {
+fn open_acl_handle(path: &Path, share: u32) -> Result<Handle> {
     let handle = Handle::new(unsafe {
         CreateFileW(
             wide(&path.to_string_lossy()).as_ptr(),
             READ_CONTROL | WRITE_DAC | WRITE_OWNER | FILE_READ_ATTRIBUTES | FILE_READ_DATA,
-            // Share read/write so a running image can stay mapped; never share
-            // DELETE, so the object cannot be replaced while this handle is held.
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            share,
             ptr::null(),
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -620,6 +627,18 @@ fn open_for_acl(path: &Path) -> Result<Handle> {
         return denied();
     }
     Ok(handle)
+}
+
+fn open_for_acl(path: &Path) -> Result<Handle> {
+    // Share read/write so a running image can stay mapped; never share
+    // DELETE, so the object cannot be replaced while this handle is held.
+    open_acl_handle(path, FILE_SHARE_READ | FILE_SHARE_WRITE)
+}
+
+fn open_for_hardening(path: &Path) -> Result<Handle> {
+    // Capture-time pins must refuse writers and replacement. Reopening by
+    // path later would follow a junction swapped in after the snapshot.
+    open_acl_handle(path, FILE_SHARE_READ)
 }
 
 fn apply_descriptor(handle: HANDLE, descriptor: &str) -> Result<()> {
@@ -642,18 +661,20 @@ fn apply_descriptor(handle: HANDLE, descriptor: &str) -> Result<()> {
     let mut revision = 0;
     if unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) } == 0 {
         let code = unsafe { GetLastError() };
-        unsafe { LocalFree(sd); }
+        unsafe {
+            LocalFree(sd);
+        }
         return Err(io::Error::from_raw_os_error(code as i32));
     }
     let inheritance = if control & SE_DACL_PROTECTED != 0 {
         PROTECTED_DACL_SECURITY_INFORMATION
-    } else { UNPROTECTED_DACL_SECURITY_INFORMATION };
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
     let result = unsafe {
         SetKernelObjectSecurity(
             handle,
-            OWNER_SECURITY_INFORMATION
-                | DACL_SECURITY_INFORMATION
-                | inheritance,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | inheritance,
             sd,
         )
     };
@@ -721,8 +742,7 @@ pub fn sharing_conflict(error: &io::Error) -> bool {
     )
 }
 
-pub fn read_descriptor(path: &Path) -> Result<String> {
-    let handle = open_path(path, true)?;
+fn read_descriptor_handle(handle: &Handle) -> Result<String> {
     let information =
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
     let mut sd = ptr::null_mut();
@@ -773,25 +793,26 @@ pub fn read_descriptor(path: &Path) -> Result<String> {
     result
 }
 
-pub fn restore_descriptor(path: &Path, descriptor: &str) -> Result<()> {
-    secure_code_with_descriptor(path, descriptor)
+pub struct CapturedTree {
+    pub snapshot: AclSnapshot,
+    pins: Vec<Handle>,
+    committed: bool,
 }
 
-#[derive(Clone)]
-pub struct AclSnapshot {
-    pub paths: Vec<(PathBuf, String)>,
-}
-
-impl AclSnapshot {
+impl CapturedTree {
     pub fn capture(paths: &[PathBuf]) -> Result<Self> {
-        let mut captured = Vec::new();
+        let trusted = trusted_installer()?;
+        let mut snapshot_paths = Vec::new();
+        let mut pins = Vec::new();
         for path in paths {
-            match open_path(path, false) {
-                Ok(_) => {
-                    if check_paths(vec![path.clone()]).is_ok() {
+            match open_for_hardening(path) {
+                Ok(handle) => {
+                    if handle_is_protected(handle.0, trusted.0) {
                         continue;
                     }
-                    captured.push((path.clone(), read_descriptor(path)?));
+                    let descriptor = read_descriptor_handle(&handle)?;
+                    snapshot_paths.push((path.clone(), descriptor));
+                    pins.push(handle);
                 }
                 Err(error) => {
                     if check_paths(vec![path.clone()]).is_ok() {
@@ -801,7 +822,62 @@ impl AclSnapshot {
                 }
             }
         }
-        Ok(Self { paths: captured })
+        Ok(Self {
+            snapshot: AclSnapshot {
+                paths: snapshot_paths,
+            },
+            pins,
+            committed: false,
+        })
+    }
+
+    pub fn harden(&self) -> Result<()> {
+        self.apply_all(CODE_DACL)
+    }
+
+    #[cfg(test)]
+    fn harden_as(&self, descriptor: &str) -> Result<()> {
+        self.apply_all(descriptor)
+    }
+
+    fn apply_all(&self, descriptor: &str) -> Result<()> {
+        for handle in &self.pins {
+            apply_descriptor(handle.0, descriptor)?;
+        }
+        Ok(())
+    }
+
+    pub fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for CapturedTree {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        // Roll back through the capture-time pins, nested objects first.
+        // Reopening by path would follow a junction swapped in after the snapshot.
+        let mut order: Vec<_> = self.pins.iter().zip(&self.snapshot.paths).collect();
+        order.sort_by(|(_, (a, _)), (_, (b, _))| restore_depth(a, b));
+        for (handle, (_, descriptor)) in order {
+            let _ = apply_descriptor(handle.0, descriptor);
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AclSnapshot {
+    pub paths: Vec<(PathBuf, String)>,
+}
+
+impl AclSnapshot {
+    pub fn capture(paths: &[PathBuf]) -> Result<Self> {
+        let mut tree = CapturedTree::capture(paths)?;
+        let snapshot = tree.snapshot.clone();
+        tree.commit();
+        Ok(snapshot)
     }
 
     pub fn merge(&self, later: &Self) -> Self {
@@ -923,32 +999,6 @@ impl AclSnapshot {
         }
         drop(ancestor_pins);
         Ok(())
-    }
-}
-
-pub struct AclRestoreGuard {
-    snapshot: AclSnapshot,
-    committed: bool,
-}
-
-impl AclRestoreGuard {
-    pub fn new(snapshot: AclSnapshot) -> Self {
-        Self {
-            snapshot,
-            committed: false,
-        }
-    }
-
-    pub fn commit(&mut self) {
-        self.committed = true;
-    }
-}
-
-impl Drop for AclRestoreGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = self.snapshot.restore();
-        }
     }
 }
 
@@ -1489,6 +1539,34 @@ mod tests {
         std::fs::write(&code, b"released").unwrap();
     }
     #[test]
+    fn captured_tree_pins_block_writers_and_replacement_through_hardening() {
+        let fixture = Fixture::new();
+        let code = fixture.0.join("Cindy.exe");
+        std::fs::write(&code, b"fixture").unwrap();
+        let sid = token_user_sid(
+            token(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() })
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        secure_code_with_descriptor(&code, &format!("O:{sid}D:(A;;FA;;;{sid})")).unwrap();
+        let before = descriptor(&code);
+        {
+            let tree = CapturedTree::capture(&[code.clone()]).unwrap();
+            assert_eq!(tree.snapshot.paths.len(), 1);
+            assert!(
+                std::fs::OpenOptions::new().write(true).open(&code).is_err(),
+                "capture must keep a no-write pin so a later open_for_acl cannot follow a swapped path"
+            );
+            assert!(std::fs::rename(&code, fixture.0.join("replaced.exe")).is_err());
+            tree.harden_as(&format!("O:{sid}D:P(A;;FRWO;;;{sid})"))
+                .unwrap();
+            assert_ne!(descriptor(&code), before);
+        }
+        assert_eq!(descriptor(&code), before);
+        std::fs::write(&code, b"released").unwrap();
+    }
+    #[test]
     fn live_writers_block_hardening_before_any_acl_change() {
         let fixture = Fixture::new();
         let code = fixture.0.join("Cindy.exe");
@@ -1546,8 +1624,10 @@ mod tests {
         std::fs::write(child.join("app.asar"), b"fixture").unwrap();
         let sid = token_user_sid(
             token(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() })
-                .unwrap().0,
-        ).unwrap();
+                .unwrap()
+                .0,
+        )
+        .unwrap();
         // Test the protected case independently of the unprotected file above.
         for path in [&nested, &child] {
             secure_code_with_descriptor(path, &format!("O:{sid}D:P(A;;FA;;;{sid})")).unwrap();

@@ -121,10 +121,12 @@ export async function openWindowsDesktopConnection(
     | { mode: 'capture'; rect: number[]; cursorOverlay?: boolean; bitrate?: number },
 ): Promise<WindowsDesktopConnection> {
   if (process.platform !== 'win32') throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
-  const prepared = await assets();
+  const prepared = await helper();
   if (!prepared) throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
   // Fixed native addon (checkout-bound in Dev), loaded only by Main. It opens the pipe in
   // this process and authenticates SCM/SYSTEM identity before sending anything.
+  // Dev status/probe reuse the last installed helper when the current fingerprint
+  // no longer matches, so an authorized service still shows Remove.
   const native = requireNative(prepared.addon) as {
     DesktopConnection: { open(binary: string, init: string): Promise<WindowsDesktopConnection> };
   };
