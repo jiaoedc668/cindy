@@ -104,6 +104,28 @@ describe('Dev Windows desktop components', () => {
       expect(await fs.readFile(previous!.addon, 'utf8')).toBe('fake-native-output');
       const restarted = createWindowsDevelopmentAssets(runtime);
       expect(await restarted.resolve()).toEqual(current);
+      expect(await restarted.installed()).toEqual(current);
+    } finally {
+      await fs.writeFile(source, original);
+    }
+  });
+
+  it('keeps the last prepared helper after the current source fingerprint no longer matches', async () => {
+    const { runtime, service } = fixture('installed-helper');
+    const previous = await service.resolve(true);
+    const source = path.join(
+      application,
+      'native',
+      'remote-desktop',
+      'windows-host',
+      'src',
+      'main.rs',
+    );
+    const original = await fs.readFile(source);
+    try {
+      await fs.writeFile(source, 'stale-source-after-install');
+      expect(await service.resolve()).toBeNull();
+      expect(await service.installed()).toEqual(previous);
     } finally {
       await fs.writeFile(source, original);
     }

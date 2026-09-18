@@ -549,7 +549,9 @@ then requests native UAC. Polling never compiles or elevates. Generated binaries
 are cached under userData by native source/runtime fingerprint, so a loaded Node
 addon is not overwritten. Normal source edits and Dev restarts reuse the grant;
 each settings poll and setup re-reads native source so a fingerprint change
-invalidates the cache without restarting Desktop. Changed native service
+invalidates the cache without restarting Desktop. Uninstall and status still
+use the last prepared helper, so a compiler failure or deleted current cache
+does not block removing an auto-start SYSTEM service. Changed native service
 binaries show an update action requiring administrator approval. The broker checks the approved Windows user and exact bound Electron
 image. An `electron .` entry is resolved against the process's actual working
 directory; utility/renderer processes and other app directories do not inherit it.

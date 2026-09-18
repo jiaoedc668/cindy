@@ -46,7 +46,9 @@ enforce sharing restrictions. Code pins request read-data/list-directory access
 and reject outstanding writers, so changing an ACL cannot leave an old writer
 able to modify approved code. Setup snapshots and restores those ACLs when
 installation fails or the service is removed, and a later install keeps the
-first captured restore record. Restore pins the application path and captured
+first captured restore record. Protected records are replaced in place so a
+crash cannot delete the previous restore file before the new one is committed.
+Restore pins the application path and captured
 tree without DELETE sharing and applies nested objects first. Protection covers
 every file under `resources/tools` and `resources/cindy-updater-runtime`,
 including Main-loaded extraResource addons. Ancestor pins open parents before

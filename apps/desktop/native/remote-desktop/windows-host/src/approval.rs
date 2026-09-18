@@ -175,9 +175,24 @@ fn write_protected_record(directory: &std::path::Path, name: &str, bytes: &[u8])
     security::secure_code(&temporary)?;
     if record.exists() {
         security::check_paths(vec![record.clone()])?;
-        fs::remove_file(&record)?;
     }
-    fs::rename(&temporary, record)?;
+    replace_protected_record(&temporary, &record)
+}
+
+fn replace_protected_record(temporary: &std::path::Path, record: &std::path::Path) -> Result<()> {
+    // Replace in place so a crash cannot leave the protected directory without
+    // the previous restore/approval record.
+    if unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+            wide(&temporary.to_string_lossy()).as_ptr(),
+            wide(&record.to_string_lossy()).as_ptr(),
+            windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(error());
+    }
     Ok(())
 }
 
@@ -369,5 +384,26 @@ mod tests {
         value["version"] = 1.into();
         value["application"] = r"\\server\share\Cindy".into();
         assert!(Approval::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    #[test]
+    fn replacing_a_protected_record_keeps_the_previous_file_until_commit() {
+        let directory = std::env::temp_dir().join(format!(
+            "cindy-lock-record-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let record = directory.join("acl-restore.json");
+        let temporary = directory.join("acl-restore.json.new");
+        std::fs::write(&record, b"previous-restore").unwrap();
+        std::fs::write(&temporary, b"next-restore").unwrap();
+        assert_eq!(std::fs::read(&record).unwrap(), b"previous-restore");
+        replace_protected_record(&temporary, &record).unwrap();
+        assert_eq!(std::fs::read(&record).unwrap(), b"next-restore");
+        assert!(!temporary.exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

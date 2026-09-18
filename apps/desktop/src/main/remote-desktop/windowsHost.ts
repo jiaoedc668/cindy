@@ -10,6 +10,14 @@ import { createWindowsDevelopmentAssets, type WindowsDesktopAssets } from './win
 const exec = promisify(execFile);
 const requireNative = createRequire(import.meta.url);
 let development: ReturnType<typeof createWindowsDevelopmentAssets> | null = null;
+function developmentAssets() {
+  return (development ??= createWindowsDevelopmentAssets({
+    application: app.getAppPath(),
+    executable: process.execPath,
+    userData: app.getPath('userData'),
+    arch: process.arch,
+  }));
+}
 async function assets(prepare = false): Promise<WindowsDesktopAssets | null> {
   if (app.isPackaged)
     return {
@@ -26,13 +34,12 @@ async function assets(prepare = false): Promise<WindowsDesktopAssets | null> {
         'cindy-windows-desktop-host.node',
       ),
     };
-  development ??= createWindowsDevelopmentAssets({
-    application: app.getAppPath(),
-    executable: process.execPath,
-    userData: app.getPath('userData'),
-    arch: process.arch,
-  });
-  return development.resolve(prepare);
+  return developmentAssets().resolve(prepare);
+}
+async function helper(prepare = false): Promise<WindowsDesktopAssets | null> {
+  const current = await assets(prepare);
+  if (current || app.isPackaged) return current;
+  return developmentAssets().installed();
 }
 export interface WindowsDesktopConnection {
   request(line: string): Promise<string>;
@@ -41,7 +48,7 @@ export interface WindowsDesktopConnection {
 export async function readWindowsDesktopSupport(): Promise<WindowsDesktopSupport | undefined> {
   if (process.platform !== 'win32') return undefined;
   try {
-    const native = await assets();
+    const native = await helper();
     if (!native) return 'missing';
     const { stdout } = await exec(native.binary, ['--status'], {
       timeout: REMOTE_DESKTOP_OFFER_BUDGET.platformStatusMs,
@@ -71,10 +78,18 @@ export async function configureWindowsDesktopSupport(enabled: boolean): Promise<
   if (process.platform !== 'win32') throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
   let native: WindowsDesktopAssets | null;
   try {
-    native = await assets(true);
+    // Uninstall must use the last installed helper. Rebuilding current source
+    // is not required to revoke an auto-start SYSTEM service.
+    native = await helper(enabled);
   } catch (error) {
-    if (!app.isPackaged) throw new Error('DESKTOP_NATIVE_BUILD_FAILED');
-    throw error;
+    if (!enabled) {
+      native = app.isPackaged ? null : await developmentAssets().installed();
+      if (!native) throw error;
+    } else if (!app.isPackaged) {
+      throw new Error('DESKTOP_NATIVE_BUILD_FAILED');
+    } else {
+      throw error;
+    }
   }
   if (!native) throw new Error('DESKTOP_SYSTEM_SERVICE_UNAVAILABLE');
   // Recreating a Dev cache does not revoke the installed grant.

@@ -14,6 +14,36 @@ export interface WindowsDesktopAssets {
   binary: string;
   addon: string;
 }
+
+function cacheRoot(userData: string): string {
+  return path.join(userData, 'remote-desktop', 'windows-development');
+}
+
+async function latestInstalledAssets(userData: string): Promise<WindowsDesktopAssets | null> {
+  const root = cacheRoot(userData);
+  let entries: string[];
+  try {
+    entries = await fs.readdir(root);
+  } catch {
+    return null;
+  }
+  let latest: { binary: string; addon: string; mtime: number } | null = null;
+  for (const name of entries) {
+    const directory = path.join(root, name);
+    const binary = path.join(directory, 'cindy-windows-desktop-host.exe');
+    const addon = path.join(directory, 'cindy-windows-desktop-host.node');
+    const input = path.join(directory, 'cindy-windows-desktop-input.exe');
+    const receipt = path.join(directory, 'ready');
+    try {
+      await Promise.all([fs.access(binary), fs.access(addon), fs.access(input), fs.access(receipt)]);
+      const mtime = (await fs.stat(receipt)).mtimeMs;
+      if (!latest || mtime > latest.mtime) latest = { binary, addon, mtime };
+    } catch {
+      /* Incomplete cache entries are not an installed helper. */
+    }
+  }
+  return latest ? { binary: latest.binary, addon: latest.addon } : null;
+}
 interface DevelopmentRuntime {
   application: string;
   executable: string;
@@ -67,12 +97,7 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
         executable,
         source,
         fingerprint,
-        directory: path.join(
-          runtime.userData,
-          'remote-desktop',
-          'windows-development',
-          fingerprint,
-        ),
+        directory: path.join(cacheRoot(runtime.userData), fingerprint),
       };
     })().finally(() => {
       describing = null;
@@ -166,5 +191,5 @@ export function createWindowsDevelopmentAssets(runtime: DevelopmentRuntime) {
     });
     return building;
   }
-  return { resolve };
+  return { resolve, installed: () => latestInstalledAssets(runtime.userData) };
 }

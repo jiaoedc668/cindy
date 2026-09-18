@@ -11,9 +11,13 @@ const runtime = vi.hoisted(() => ({
   exec: vi.fn(),
   open: vi.fn(),
   development: vi.fn(),
+  installed: vi.fn(),
 }));
 vi.mock('../windowsDevelopment', () => ({
-  createWindowsDevelopmentAssets: () => ({ resolve: runtime.development }),
+  createWindowsDevelopmentAssets: () => ({
+    resolve: runtime.development,
+    installed: runtime.installed,
+  }),
 }));
 vi.mock('electron', () => ({ app: runtime.app }));
 vi.mock('node:child_process', () => ({
@@ -36,6 +40,7 @@ beforeEach(() => {
   runtime.exec.mockReset().mockResolvedValue({ stdout: 'ready\n' });
   runtime.open.mockReset().mockResolvedValue({ close: vi.fn(), request: vi.fn() });
   runtime.development.mockReset().mockResolvedValue(null);
+  runtime.installed.mockReset().mockResolvedValue(null);
   Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
   Object.defineProperty(process, 'resourcesPath', { configurable: true, value: customResources });
 });
@@ -108,6 +113,26 @@ describe('Windows lock screen service setup', () => {
     await configureWindowsDesktopSupport(true);
     expect(runtime.development).toHaveBeenNthCalledWith(1, true);
     expect(runtime.exec.mock.calls.map((call) => call[1])).toEqual([['--status']]);
+  });
+
+  it('uninstalls an authorized Dev service from the last installed helper without rebuilding', async () => {
+    runtime.app.isPackaged = false;
+    const installed = {
+      binary: path.join(customResources, 'installed-host.exe'),
+      addon: path.join(customResources, 'installed-host.node'),
+    };
+    runtime.installed.mockResolvedValue(installed);
+    runtime.exec.mockResolvedValue({ stdout: 'updateRequired\n' });
+    expect(await readWindowsDesktopSupport()).toBe('updateRequired');
+    expect(runtime.development).toHaveBeenCalledWith(false);
+    expect(runtime.exec.mock.calls[0][0]).toBe(installed.binary);
+    await configureWindowsDesktopSupport(false);
+    expect(runtime.development.mock.calls.some((call) => call[0] === true)).toBe(false);
+    expect(runtime.exec.mock.calls.at(-1)).toEqual([
+      installed.binary,
+      ['--elevate-uninstall'],
+      expect.objectContaining({ windowsHide: true }),
+    ]);
   });
 
   it('requests administrator approval when the prepared Dev service needs installation or update', async () => {
