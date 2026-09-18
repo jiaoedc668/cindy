@@ -127,6 +127,12 @@ and Light/Dark on a physical phone. Unit tests and simulator builds do not estab
 background PiP acceptance. Roll out the Desktop signaling-loss fix with the native
 phone build; older Desktop hosts may still stop media when signaling disconnects.
 
+Run `node apps/mobile/scripts/test-remote-desktop-receiver.mjs` on macOS to
+compile and execute the production receiver against test-only UIKit/WebRTC doubles.
+It covers attempt isolation, late SDP/ICE/frame callbacks, idempotent stop,
+disconnect timer cancellation and presentation challenge authorization. The doubles
+control SDK callbacks; they do not validate framework ABI, decoding or AVKit behavior.
+
 iOS 27 SDK builds also require the scene lifecycle. Expo 57.0.23 or newer and
 `expo-build-properties`'s `ios.enableSceneSupport` generate Expo's scene delegate
 manifest and move window startup out of the legacy app delegate. Verify actual
